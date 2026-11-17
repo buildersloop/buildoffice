@@ -1,0 +1,20 @@
+name: vault_app
+description: "保管庫のファイルブラウザ（Phase 0。Windows）。"
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.10.7
+
+# 依存は SDK に入っているものだけ：dart:ffi・dart:isolate・flutter・flutter_test。
+# package:ffi・ffigen・flutter_rust_bridge は使わない。cupertino_icons・flutter_lints は外した。
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true

@@ -1,0 +1,53 @@
+# cargo-deny の設定：依存のライセンス・取得先・重複した版・脆弱性・ビルドスクリプトを、機械で確かめる。
+# cargo-deny 0.20.2 で確かめた。
+# このリポジトリのクレートのライセンスは AGPL-3.0-only（2026-11-17 決定。Cargo.toml の workspace.package）。
+# 自分のクレートは publish = false なので、下の [licenses.private] で判定から外す（許可の一覧には足さない）。
+
+[graph]
+# feature（vault-core の test-support、vault-mcp・vault-ffi の test-panic）を有効にしたときの依存も含めて調べる
+all-features = true
+
+[advisories]
+# RustSec の脆弱性のデータベースで調べる。許す例外はない。取り下げられた版・保守されていない・健全でないものも拒否する
+ignore = []
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+
+[licenses]
+# 許すライセンス（serde・serde_json と、それらが連れてくる依存が使うもの）。足すときは管理者が決める（勝手に増やさない）
+allow = ["MIT", "Apache-2.0", "Unlicense", "Unicode-3.0"]
+confidence-threshold = 0.8
+exceptions = []
+# 許したのに使われていないライセンスがあれば止める（今は4つとも使われている）
+unused-allowed-license = "deny"
+
+[licenses.private]
+# ワークスペースの自分のクレート（publish = false）のライセンスは AGPL-3.0-only（2026-11-17 決定）。
+# 許可の一覧は他の人の依存のためのものなので、自分のクレートは判定から外す
+ignore = true
+
+[bans]
+# 同じパッケージの版が重なったら、警告にする
+multiple-versions = "warn"
+# 版を決めない依存（"*"）は拒否する。ワークスペースの中の path の依存だけは許す
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[bans.build]
+# ビルドスクリプト（build.rs）を持ってよい依存は、今の6つだけ。増えたら止まる（管理者が確かめてから許可する）
+allow-build-scripts = [
+    "proc-macro2",
+    "quote",
+    "serde",
+    "serde_core",
+    "serde_json",
+    "zmij",
+]
+
+[sources]
+# 取得先は crates.io だけ。ほかの registry と git は拒否する
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

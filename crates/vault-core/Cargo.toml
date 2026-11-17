@@ -1,0 +1,24 @@
+[package]
+name = "vault-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# 外部の依存は serde・serde_json だけ。ライセンスの表示は、ルートの THIRD_PARTY_LICENSES。
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# OS の関数を安全な関数として包む、ワークスペースの中のクレート（依存なし）。Windows だけで使う。
+[target.'cfg(windows)'.dependencies]
+os-sys = { path = "../os-sys" }
+
+[features]
+# テストだけが使う部品（`test_support`）。ふつうのビルドと release のビルドには入らない。
+test-support = []
+
+# 結合テストからだけ `test-support` を使うため、自分自身を feature 付きで読み込む（外部の依存ではない）。
+[dev-dependencies]
+vault-core = { path = ".", features = ["test-support"] }

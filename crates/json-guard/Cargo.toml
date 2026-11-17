@@ -1,0 +1,10 @@
+[package]
+name = "json-guard"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# 依存はない（外部のクレートも、ワークスペースのクレートも使わない）。
+# mcp-proto（MCP の要求）と vault-ffi（アプリの要求）が、読む前の JSON の要素の数の上限に使う。

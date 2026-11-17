@@ -1,0 +1,48 @@
+Buildoffice
+Copyright (C) 2026 The Buildoffice Authors
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, version 3 of the License only
+(SPDX-License-Identifier: AGPL-3.0-only).
+
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero
+General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program (the file LICENSE). If not, see
+<https://www.gnu.org/licenses/>.
+
+If you modify this program and let users interact with it remotely
+through a computer network, the AGPL requires you to offer them the
+corresponding source code of your modified version.
+
+Third-party software:
+- Rust crates used by the core: see THIRD_PARTY_LICENSES.
+- The desktop app is built with Flutter. The licenses of the Flutter
+  engine and the Dart packages bundled with the app are in the app's
+  data/flutter_assets/NOTICES.Z (gzip-compressed) and summarized in
+  THIRD_PARTY_LICENSES.
+
+----------------------------------------------------------------------
+
+Buildoffice
+Copyright (C) 2026 The Buildoffice Authors
+
+このプログラムはフリーソフトウェアです。Free Software Foundation が公表した
+GNU Affero General Public License の第3版だけ（AGPL-3.0-only）の条件のもとで、
+再配布や改変ができます。
+
+このプログラムは有用であることを願って配布しますが、無保証です。商品性や
+特定の目的への適合性の黙示の保証もありません。詳しくは GNU Affero General
+Public License（ファイル LICENSE、または <https://www.gnu.org/licenses/>）を
+見てください。
+
+このプログラムを改変し、ネットワークを通じて利用者に使わせる場合、AGPL は、
+改変した版の対応するソースコードを利用者に提供することを求めます。
+
+他のソフトウェア：Rust のクレートは THIRD_PARTY_LICENSES を、アプリに入っている
+Flutter のエンジンと Dart のパッケージは、アプリの data/flutter_assets/NOTICES.Z
+（gzip で縮めたもの）と THIRD_PARTY_LICENSES を見てください。

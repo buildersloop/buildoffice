@@ -1,0 +1,12 @@
+[
+  "vault_info",
+  "vault_list",
+  "vault_read",
+  "vault_write",
+  "vault_mkdir",
+  "vault_move",
+  "vault_delete",
+  "vault_trash_list",
+  "vault_restore",
+  "vault_changes"
+]

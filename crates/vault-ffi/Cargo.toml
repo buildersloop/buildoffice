@@ -1,0 +1,30 @@
+[package]
+name = "vault-ffi"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# 外部の依存は serde・serde_json だけ。受付口は vault-core の api::call。
+# json-guard は、依存のないワークスペースの中のクレート（読む前の JSON の要素の数を数える。mcp-proto と共有）。
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+vault-core = { path = "../vault-core" }
+json-guard = { path = "../json-guard" }
+
+[features]
+# テストだけ：debug ビルドで、ツールの名前 `__vault_ffi_test_panic` の vf_call が panic する（panic のあとの扱いを確かめるため）。
+# 配布の DLL（cargo build --release）には、どんなビルドのしかたでも入らない（debug_assertions とあわせて囲む）。
+test-panic = []
+
+[dev-dependencies]
+vault-ffi = { path = ".", features = ["test-panic"] }
+
+# unsafe を書いてよいのはこのクレートだけ。ブロックごとに `// SAFETY:` を書く。
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
