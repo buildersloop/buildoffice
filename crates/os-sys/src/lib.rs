@@ -8,13 +8,13 @@
 //!
 //! 何に使うか：
 //! - 親のフォルダのハンドルを基準に、リンクをたどらずに開く・作る（[`open_child`]・[`open_pass_dir`]・
-//!   [`create_dir_child`]・[`create_file_child`]。W15 の NtCreateFile）。
-//! - 開いたハンドルの最終のパス（[`final_path`]）・ファイルの ID（[`file_id`]）と、ハンドルでの列挙
-//!   （[`read_dir_by_handle`]。W1）。
-//! - ハンドルでの rename（[`rename_no_replace`]・[`rename_replace`]。W15 の NtSetInformationFile）と、ハンドルで
-//!   消す処理（[`delete_by_handle`]。W2）。
-//! - 空き容量（[`free_space`]。W3）と、OS の乱数（[`os_random`]。W4）。
-//! - 既知のフォルダの場所（[`known_folder`]。W5）。守る場所を、環境変数だけでなく OS の値でも決めるため
+//!   [`create_dir_child`]・[`create_file_child`]。NtCreateFile）。
+//! - 開いたハンドルの最終のパス（[`final_path`]）・ファイルの ID（[`file_id`]）・リンクの数（[`link_count`]）と、
+//!   ハンドルでの列挙（[`read_dir_by_handle`]）。
+//! - ハンドルでの rename（[`rename_no_replace`]・[`rename_replace`]。NtSetInformationFile）と、ハンドルで
+//!   消す処理（[`delete_by_handle`]）。
+//! - 空き容量（[`free_space`]）と、OS の乱数（[`os_random`]）。
+//! - 既知のフォルダの場所（[`known_folder`]）。守る場所を、環境変数だけでなく OS の値でも決めるため
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![cfg_attr(not(windows), forbid(unsafe_code))]
@@ -33,6 +33,6 @@ pub use win::{
     Access, Created, Dir, DirEntry, EntryKind, FileId, InvalidName, KnownFolder, Links, Name,
     Opened, OpenedPass, Parent, PassDir, Share, Want, create_dir_child, create_file_child,
     delete_by_handle, file_id, final_path, free_space, is_reparse_point_encountered, known_folder,
-    open_child, open_pass_dir, open_path, os_random, read_dir_by_handle, rename_no_replace,
-    rename_replace,
+    link_count, open_child, open_pass_dir, open_path, os_random, read_dir_by_handle,
+    rename_no_replace, rename_replace,
 };

@@ -41,7 +41,7 @@ typedef _CallDart =
 typedef _CloseNative = Void Function(Uint64 handle);
 typedef _CloseDart = void Function(int handle);
 
-/// 要求を送る関数（vf_open か vf_call）。
+/// 要求を送る関数（vf_open・vf_create・vf_open_default・vf_call）。
 typedef _Send =
     Pointer<Uint8> Function(Pointer<Uint8> req, int len, Pointer<Size> outLen);
 
@@ -51,6 +51,10 @@ final class VaultLibrary {
     : _alloc = lib.lookupFunction<_AllocNative, _AllocDart>('vf_alloc'),
       _free = lib.lookupFunction<_FreeNative, _FreeDart>('vf_free'),
       _open = lib.lookupFunction<_OpenNative, _OpenDart>('vf_open'),
+      _create = lib.lookupFunction<_OpenNative, _OpenDart>('vf_create'),
+      _openDefault = lib.lookupFunction<_OpenNative, _OpenDart>(
+        'vf_open_default',
+      ),
       _call = lib.lookupFunction<_CallNative, _CallDart>('vf_call'),
       _close = lib.lookupFunction<_CloseNative, _CloseDart>('vf_close');
 
@@ -61,11 +65,20 @@ final class VaultLibrary {
   final _AllocDart _alloc;
   final _FreeDart _free;
   final _OpenDart _open;
+  final _OpenDart _create;
+  final _OpenDart _openDefault;
   final _CallDart _call;
   final _CloseDart _close;
 
   /// vf_open（`{"root","init","read_only"}`）。返り値は `{"ok":…}` か `{"error":…}` の JSON の文字。
   String open(String requestJson) => _exchange(requestJson, _open);
+
+  /// vf_create（`{"parent","name"}`）。返り値は vf_open と同じ形の JSON の文字。
+  String create(String requestJson) => _exchange(requestJson, _create);
+
+  /// vf_open_default（要求はいつも `{}`。既定の保管庫を開く。なければ作る）。返り値は
+  /// `{"ok":{"handle","created"}}` か `{"error":…}` の JSON の文字。場所は vault-core が決める（Dart はパスを渡さない）。
+  String openDefault() => _exchange('{}', _openDefault);
 
   /// vf_call（`{"tool","args"}`）。
   String call(int handle, String requestJson) => _exchange(

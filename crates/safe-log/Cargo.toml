@@ -1,0 +1,11 @@
+[package]
+name = "safe-log"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# 依存はない（外部のクレートも、ワークスペースのクレートも使わない。serde_json も使わない）。
+# ログの1行を「書いてよい型」だけで組み立てる部品と、panic の知らせの差し替えと、秘密の値の包み。
+# mcp-proto と vault-mcp が使う。段0（葉）のクレート。

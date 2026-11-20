@@ -6,10 +6,13 @@
 //!   呼ばれたら、vault-core が `READ_ONLY` を返す。
 //! - ツールの処理が途中で止まった（panic）ら、このプロセスでは、それ以降の書くツールを止める（`INTERNAL`）。
 //!   読むツールと vault_changes は続けて使える。
+//! - ログに書いてよい名前（`log_names`）は、10 個のツールの名前と 24 個のエラーのコード。ソースに書いた一覧で、
+//!   `tool_specs()` の名前とコードの名前に合うことをテストで確かめる。
 
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
 use mcp_proto::{CallError, ToolDef, ToolHost};
+use safe_log::{Name, name};
 use serde_json::Value;
 use vault_core::api::{self, WRITE_TOOLS};
 use vault_core::{Actor, ErrorCode, Vault};
@@ -19,6 +22,45 @@ use vault_core::{Actor, ErrorCode, Vault};
 /// release のビルドには、どんなビルドのしかたでも（`--all-targets`・`cargo test --release` でも）、入口も環境変数の名前も入らない。
 #[cfg(all(feature = "test-panic", debug_assertions))]
 pub const TEST_PANIC_ENV: &str = "VAULT_MCP_TEST_PANIC_TOOL";
+
+/// ログに書いてよい名前：ツールの名前（`api::tool_specs()` と同じ 10 個）と、エラーのコード（`ErrorCode` の 24 個）。
+/// ここにない名前は、ログで `?` になる（返事は変わらない）。ツールかコードを足したら、ここにも足す（テストで気づく）。
+pub const LOG_NAMES: &[Name] = &[
+    name!("vault_info"),
+    name!("vault_list"),
+    name!("vault_read"),
+    name!("vault_write"),
+    name!("vault_mkdir"),
+    name!("vault_move"),
+    name!("vault_delete"),
+    name!("vault_trash_list"),
+    name!("vault_restore"),
+    name!("vault_changes"),
+    name!("INVALID_PATH"),
+    name!("OUTSIDE_VAULT"),
+    name!("RESERVED_PATH"),
+    name!("INVALID_ROOT"),
+    name!("NOT_A_VAULT"),
+    name!("LOCKED"),
+    name!("INVALID_ARGUMENT"),
+    name!("IO_ERROR"),
+    name!("INTERNAL"),
+    name!("NOT_FOUND"),
+    name!("NOT_A_DIRECTORY"),
+    name!("NOT_A_FILE"),
+    name!("NOT_UTF8"),
+    name!("TOO_LARGE"),
+    name!("ALREADY_EXISTS"),
+    name!("CONFLICT"),
+    name!("DISK_FULL"),
+    name!("BUSY"),
+    name!("READ_ONLY"),
+    name!("UNKNOWN_TOOL"),
+    name!("NOT_IMPLEMENTED"),
+    name!("ACCESS_DENIED"),
+    name!("DIR_NOT_EMPTY"),
+    name!("INVALID_TRASH_ENTRY"),
+];
 
 /// 保管庫につないだ受付口。
 pub struct VaultHost {
@@ -81,5 +123,67 @@ impl ToolHost for VaultHost {
                 resume_unwind(payload)
             }
         }
+    }
+
+    fn log_names(&self) -> &[Name] {
+        LOG_NAMES
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 一覧のツールの名前は `tool_specs()` の名前とちょうど同じ（順番も）。
+    #[test]
+    fn log_names_cover_every_tool() {
+        let tools: Vec<&str> = api::tool_specs().iter().map(|spec| spec.name).collect();
+        let listed: Vec<&str> = LOG_NAMES[..tools.len()]
+            .iter()
+            .map(|name| name.as_str())
+            .collect();
+        assert_eq!(listed, tools);
+        for tool in &tools {
+            assert!(safe_log::pick(tool, LOG_NAMES).is_some(), "{tool}");
+        }
+    }
+
+    /// 一覧のコードは。
+    #[test]
+    fn log_names_cover_every_error_code() {
+        let codes = [
+            ErrorCode::InvalidPath,
+            ErrorCode::OutsideVault,
+            ErrorCode::ReservedPath,
+            ErrorCode::InvalidRoot,
+            ErrorCode::NotAVault,
+            ErrorCode::Locked,
+            ErrorCode::InvalidArgument,
+            ErrorCode::IoError,
+            ErrorCode::Internal,
+            ErrorCode::NotFound,
+            ErrorCode::NotADirectory,
+            ErrorCode::NotAFile,
+            ErrorCode::NotUtf8,
+            ErrorCode::TooLarge,
+            ErrorCode::AlreadyExists,
+            ErrorCode::Conflict,
+            ErrorCode::DiskFull,
+            ErrorCode::Busy,
+            ErrorCode::ReadOnly,
+            ErrorCode::UnknownTool,
+            ErrorCode::NotImplemented,
+            ErrorCode::AccessDenied,
+            ErrorCode::DirNotEmpty,
+            ErrorCode::InvalidTrashEntry,
+        ];
+        let tools = api::tool_specs().len();
+        let listed: Vec<&str> = LOG_NAMES[tools..]
+            .iter()
+            .map(|name| name.as_str())
+            .collect();
+        let names: Vec<&str> = codes.iter().map(|code| code.as_str()).collect();
+        assert_eq!(listed, names);
+        assert_eq!(LOG_NAMES.len(), 10 + 24);
     }
 }

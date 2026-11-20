@@ -10,11 +10,11 @@
 //! 7. 方式を決める（Modern・Legacy・`initialize` の前）。版の確認の -32022・-32602 はここ
 //! 8. メソッドごとに処理する。tools/call は、どの方式でも同じ受付口（`ToolHost::call`）を通る
 
-use std::fmt;
 use std::io::{self, BufRead, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
 
+use safe_log::{Name, name};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
@@ -41,13 +41,35 @@ const CACHE_SCOPE: &str = "private";
 pub const MAX_ACTOR_NAME_CHARS: usize = 64;
 /// 名前がないとき・整えて空になったときの名前。
 pub const UNKNOWN_ACTOR_NAME: &str = "unknown";
-/// ログに出すメソッド名・ツール名の長さの上限。
-const MAX_LOG_NAME_CHARS: usize = 64;
+/// 「知らないメソッド」の返事の文に入れるメソッド名の長さの上限。
+const MAX_REPLY_NAME_CHARS: usize = 64;
 /// -32022 の data.requested に、そのまま返す版の長さの上限（印字できる ASCII のときだけ返す）。
 const MAX_REQUESTED_VERSION_CHARS: usize = 64;
 /// 1行の中で、文字列の外にある `[`・`{`・`,` の数の上限（Value のメモリを抑える）。
 /// 数え方と値は json-guard にまとめてある（vault-ffi と共有）。
 pub const MAX_JSON_ELEMENTS: usize = json_guard::MAX_ELEMENTS;
+
+/// ログに書くメソッド名の一覧（mcp-proto が扱うメソッドだけ）。ほかのメソッド名は `?` にする。
+const KNOWN_METHODS: &[Name] = &[
+    name!("initialize"),
+    name!("ping"),
+    name!("server/discover"),
+    name!("tools/list"),
+    name!("tools/call"),
+    name!("notifications/initialized"),
+    name!("notifications/cancelled"),
+];
+/// ログの書き手の名前と、キー。
+const LOG_SOURCE: Name = name!("mcp");
+const LOG_METHOD: Name = name!("method");
+const LOG_TOOL: Name = name!("tool");
+const LOG_RESULT: Name = name!("result");
+const LOG_MS: Name = name!("ms");
+/// ログの result の名前（エラーの番号とツールのエラーのコードのほか）。
+const RESULT_OK: Name = name!("ok");
+const RESULT_NOTIFICATION: Name = name!("notification");
+const RESULT_NOTIFICATION_IGNORED: Name = name!("notification-ignored");
+const RESULT_RESPONSE_IGNORED: Name = name!("response-ignored");
 
 /// JSON-RPC のエラーの番号。
 pub mod codes {
@@ -110,6 +132,10 @@ pub trait ToolHost {
     /// （kind はここでは渡さない。クライアントが送ってきた値からは決めない）。
     /// 結果は JSON のオブジェクトにする（`structuredContent` はオブジェクトのため）。オブジェクトでなければ -32603 にする。
     fn call(&mut self, name: &str, arguments: &Value, actor_id: &str) -> Result<Value, CallError>;
+
+    /// ログに書いてよい名前の一覧（ツールの名前と、`CallError::Tool` のエラーのコード）。`safe_log::name!` で作る。
+    /// ログには、送られたツール名・返したコードがこの一覧にあるときだけ一覧の名前を書き、ほかは `?` にする。
+    fn log_names(&self) -> &[Name];
 }
 
 /// 要求を処理する方式。
@@ -175,25 +201,53 @@ struct Negotiated {
     actor_id: String,
 }
 
+/// ログの1つの欄の値。名前は一覧の側の名前だけで、送られた文字そのものは持たない。
+#[derive(Debug, Clone, Copy, Default)]
+enum Logged {
+    /// ない（`-`）。
+    #[default]
+    Missing,
+    /// 一覧の名前・こちらが決めた名前。
+    Name(Name),
+    /// 送られたが、一覧にない（`?`）。
+    Unknown,
+    /// JSON-RPC のエラーの番号。
+    Code(i64),
+}
+
+impl Logged {
+    /// 送られた文字を一覧と照らす（あれば一覧の名前、なければ `?`）。
+    fn pick(input: &str, allowed: &[Name]) -> Self {
+        safe_log::pick(input, allowed).map_or(Self::Unknown, Self::Name)
+    }
+
+    fn put(self, line: safe_log::Line, key: Name) -> safe_log::Line {
+        match self {
+            Self::Missing => line.missing(key),
+            Self::Name(name) => line.name(key, name),
+            Self::Unknown => line.unknown(key),
+            Self::Code(code) => line.int(key, code),
+        }
+    }
+}
+
 /// 1つの要求のログ（メソッド名・ツール名・結果のコード・かかった時間だけ。引数と中身は入れない）。
+/// 書くときは safe-log の1行（`mcp: method=… tool=… result=… ms=…`）に組み立てる。
 #[derive(Debug, Clone, Default)]
 struct LogLine {
-    method: Option<String>,
-    tool: Option<String>,
-    result: String,
+    method: Logged,
+    tool: Logged,
+    result: Logged,
     elapsed: Duration,
 }
 
-impl fmt::Display for LogLine {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "mcp: method={} tool={} result={} ms={}",
-            self.method.as_deref().unwrap_or("-"),
-            self.tool.as_deref().unwrap_or("-"),
-            self.result,
-            self.elapsed.as_millis()
-        )
+impl LogLine {
+    fn to_line(&self) -> safe_log::Line {
+        let line = safe_log::Line::new(LOG_SOURCE);
+        let line = self.method.put(line, LOG_METHOD);
+        let line = self.tool.put(line, LOG_TOOL);
+        let line = self.result.put(line, LOG_RESULT);
+        line.ms(LOG_MS, self.elapsed)
     }
 }
 
@@ -256,7 +310,7 @@ impl<H: ToolHost> Server<H> {
             let reply = match line {
                 Line::Eof => return Ok(()),
                 Line::TooLong => {
-                    entry.result = codes::INVALID_REQUEST.to_string();
+                    entry.result = Logged::Code(codes::INVALID_REQUEST);
                     Some(error_reply(
                         Value::Null,
                         codes::INVALID_REQUEST,
@@ -281,7 +335,7 @@ impl<H: ToolHost> Server<H> {
                 output.flush()?;
             }
             entry.elapsed = start.elapsed();
-            let _ = writeln!(log, "{entry}");
+            let _ = writeln!(log, "{}", entry.to_line());
         }
     }
 
@@ -289,7 +343,7 @@ impl<H: ToolHost> Server<H> {
     fn handle(&mut self, line: &[u8], log: &mut LogLine) -> Option<Value> {
         // 2. JSON として読む。読む前に、要素の数を数えて、多すぎれば読まない（Value は入力より何十倍も大きくなるため）
         if json_guard::too_many_elements(line, MAX_JSON_ELEMENTS) {
-            log.result = codes::INVALID_REQUEST.to_string();
+            log.result = Logged::Code(codes::INVALID_REQUEST);
             return Some(error_reply(
                 Value::Null,
                 codes::INVALID_REQUEST,
@@ -299,7 +353,7 @@ impl<H: ToolHost> Server<H> {
         }
         // 深さの上限は serde_json の既定 128 のまま
         let Ok(message) = serde_json::from_slice::<Value>(line) else {
-            log.result = codes::PARSE_ERROR.to_string();
+            log.result = Logged::Code(codes::PARSE_ERROR);
             return Some(error_reply(
                 Value::Null,
                 codes::PARSE_ERROR,
@@ -309,7 +363,7 @@ impl<H: ToolHost> Server<H> {
         };
         // 3. バッチ
         let Value::Object(mut object) = message else {
-            log.result = codes::INVALID_REQUEST.to_string();
+            log.result = Logged::Code(codes::INVALID_REQUEST);
             let text = if message.is_array() {
                 "バッチ（JSON-RPC の配列）は受け付けない。1行に1つの要求を送る"
             } else {
@@ -321,7 +375,7 @@ impl<H: ToolHost> Server<H> {
         if !object.contains_key("method")
             && (object.contains_key("result") || object.contains_key("error"))
         {
-            log.result = "response-ignored".to_owned();
+            log.result = Logged::Name(RESULT_RESPONSE_IGNORED);
             return None;
         }
         // 4. 形を確かめる。id は、文字列か、i64・u64 で表せる数だけ（小数・大きすぎる数・-0 は使えない）
@@ -335,7 +389,9 @@ impl<H: ToolHost> Server<H> {
             Some(Value::String(method)) => Some(method),
             _ => None,
         };
-        log.method = method.as_deref().map(log_name);
+        log.method = method.as_deref().map_or(Logged::Missing, |method| {
+            Logged::pick(method, KNOWN_METHODS)
+        });
         let shape_error = if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
             Some("jsonrpc は \"2.0\" にする")
         } else if method.is_none() {
@@ -348,7 +404,7 @@ impl<H: ToolHost> Server<H> {
             None
         };
         if let Some(text) = shape_error {
-            log.result = codes::INVALID_REQUEST.to_string();
+            log.result = Logged::Code(codes::INVALID_REQUEST);
             return Some(error_reply(
                 id.unwrap_or(Value::Null),
                 codes::INVALID_REQUEST,
@@ -359,16 +415,15 @@ impl<H: ToolHost> Server<H> {
         let method = method.unwrap_or_default();
         // 5. 通知には返事をしない。initialized・cancelled 以外は無視し、受付口にも渡さない
         let Some(id) = id else {
-            log.result = match method.as_str() {
-                "notifications/initialized" | "notifications/cancelled" => "notification",
-                _ => "notification-ignored",
-            }
-            .to_owned();
+            log.result = Logged::Name(match method.as_str() {
+                "notifications/initialized" | "notifications/cancelled" => RESULT_NOTIFICATION,
+                _ => RESULT_NOTIFICATION_IGNORED,
+            });
             return None;
         };
         // 6. 回数の制限（方式と版の確認より前）
         if !self.limiter.allow((self.clock)()) {
-            log.result = codes::RATE_LIMITED.to_string();
+            log.result = Logged::Code(codes::RATE_LIMITED);
             return Some(error_reply(id, codes::RATE_LIMITED, "Rate limited", None));
         }
         // 7・8. 方式を決めて、メソッドごとに処理する（params は取り出して渡し、写さない）
@@ -376,13 +431,13 @@ impl<H: ToolHost> Server<H> {
         drop(object);
         let reply = match self.request(&method, params, log) {
             Ok(result) => {
-                if log.result.is_empty() {
-                    log.result = "ok".to_owned();
+                if matches!(log.result, Logged::Missing) {
+                    log.result = Logged::Name(RESULT_OK);
                 }
                 json!({"jsonrpc": "2.0", "id": id, "result": result})
             }
             Err(e) => {
-                log.result = e.code.to_string();
+                log.result = Logged::Code(e.code);
                 error_reply(id, e.code, &e.message, e.data)
             }
         };
@@ -562,7 +617,7 @@ fn call_tool<H: ToolHost>(
     let Some(Value::String(name)) = params.remove("name") else {
         return Err(invalid_params("name（ツールの名前）を文字列で渡す"));
     };
-    log.tool = Some(log_name(&name));
+    log.tool = Logged::pick(&name, host.log_names());
     let arguments = match params.remove("arguments") {
         None | Some(Value::Null) => Value::Object(Map::new()),
         Some(arguments) => arguments,
@@ -591,12 +646,12 @@ fn call_tool<H: ToolHost>(
             });
         }
         Ok(Ok(value)) => {
-            log.result = "ok".to_owned();
+            log.result = Logged::Name(RESULT_OK);
             let text = serde_json::to_string(&value).map_err(|_| internal())?;
             (false, text, value)
         }
         Ok(Err(CallError::Tool { code, message })) => {
-            log.result = log_name(&code);
+            log.result = Logged::pick(&code, host.log_names());
             let text = format!("{code}: {message}");
             (
                 true,
@@ -647,10 +702,11 @@ pub fn clean_actor_name(name: Option<&str>) -> String {
     }
 }
 
-/// ログに出す名前（メソッド名・ツール名・コード）：印字できる ASCII（空白を除く）で 64 字まで。ほかの文字があれば `?`。
-fn log_name(name: &str) -> String {
+/// 「知らないメソッド」の返事の文に入れるメソッド名：印字できる ASCII（空白を除く）で 64 字まで。ほかの文字があれば `?`。
+/// 返事は送ってきた相手にだけ返す（stdout）。ログ（stderr）には使わない（ログは `KNOWN_METHODS` で照らす）。
+fn reply_name(name: &str) -> String {
     if !name.is_empty()
-        && name.chars().count() <= MAX_LOG_NAME_CHARS
+        && name.chars().count() <= MAX_REPLY_NAME_CHARS
         && name.chars().all(|c| c.is_ascii_graphic())
     {
         name.to_owned()
@@ -679,7 +735,7 @@ fn invalid_params(message: &str) -> RpcError {
 fn method_not_found(method: &str) -> RpcError {
     RpcError {
         code: codes::METHOD_NOT_FOUND,
-        message: format!("知らないメソッド：{}", log_name(method)),
+        message: format!("知らないメソッド：{}", reply_name(method)),
         data: None,
     }
 }
@@ -717,11 +773,53 @@ mod tests {
     }
 
     #[test]
-    fn log_names_never_carry_odd_characters() {
-        assert_eq!(log_name("tools/call"), "tools/call");
-        assert_eq!(log_name("a\nb"), "?");
-        assert_eq!(log_name(&"m".repeat(65)), "?");
-        assert_eq!(log_name(""), "?");
+    fn reply_names_never_carry_odd_characters() {
+        assert_eq!(reply_name("tools/call"), "tools/call");
+        assert_eq!(reply_name("a\nb"), "?");
+        assert_eq!(reply_name(&"m".repeat(65)), "?");
+        assert_eq!(reply_name(""), "?");
+    }
+
+    /// ログのメソッド名は、扱うメソッドの一覧の名前だけ。ほかは `?`、ないときは `-`。
+    #[test]
+    fn log_lines_carry_only_known_method_names() {
+        for method in [
+            "initialize",
+            "ping",
+            "server/discover",
+            "tools/list",
+            "tools/call",
+            "notifications/initialized",
+            "notifications/cancelled",
+        ] {
+            let entry = LogLine {
+                method: Logged::pick(method, KNOWN_METHODS),
+                ..LogLine::default()
+            };
+            assert_eq!(
+                entry.to_line().to_string(),
+                format!("mcp: method={method} tool=- result=- ms=0")
+            );
+        }
+        for method in [
+            r"C:\Profiles\SECRET-USER-q7\a.txt",
+            "192.168.77.88",
+            "home/alice",
+            "resources/list",
+            "TOOLS/CALL",
+            "",
+        ] {
+            let entry = LogLine {
+                method: Logged::pick(method, KNOWN_METHODS),
+                tool: Logged::Unknown,
+                result: Logged::Code(codes::METHOD_NOT_FOUND),
+                elapsed: Duration::from_millis(3),
+            };
+            assert_eq!(
+                entry.to_line().to_string(),
+                "mcp: method=? tool=? result=-32601 ms=3"
+            );
+        }
     }
 
     /// 上限は json-guard と同じ値（数え方のテストは json-guard にある）。

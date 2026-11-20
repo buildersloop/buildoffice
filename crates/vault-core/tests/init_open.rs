@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use common::{TestDir, actor, env, expect_code, new_vault};
-use vault_core::{ErrorCode, ErrorDetail, FORMAT, Vault};
+use vault_core::{ErrorCode, ErrorDetail, FORMAT, Vault, check_parent_dir};
 
 #[test]
 fn init_creates_the_layout_and_open_reads_it() {
@@ -538,4 +538,77 @@ fn cmd_paths_are_absolute_without_slashes() {
     assert!(!text.contains('/'), "{text}");
     assert!(std::path::Path::new(&arg).is_absolute(), "{text}");
     assert!(text.ends_with(r"target\dev\x"), "{text}");
+}
+
+/// `check_parent_dir`（画面から作るとき）：すでにあるフォルダだけを通す。ない（何段でも）・ファイル・途中がファイルは、
+/// どれも同じ INVALID_ROOT（「置き場所のフォルダがない」）で、何も作らない。文にパスを入れない。
+#[test]
+fn check_parent_dir_accepts_only_an_existing_folder() {
+    let dir = TestDir::new("parent-dir");
+    check_parent_dir(dir.path()).unwrap();
+    // 末尾に区切りがあってもよい
+    let trailing = PathBuf::from(format!(
+        "{}{}",
+        dir.path().display(),
+        std::path::MAIN_SEPARATOR
+    ));
+    check_parent_dir(&trailing).unwrap();
+    let sub = dir.join("sub");
+    fs::create_dir(&sub).unwrap();
+    check_parent_dir(&sub).unwrap();
+
+    let file = dir.join("f.txt");
+    fs::write(&file, b"keep").unwrap();
+    let before = names(dir.path());
+    for (what, parent) in [
+        ("ない", dir.join("none")),
+        ("何段もない", dir.join("a").join("b").join("c")),
+        ("ファイル", file.clone()),
+        ("途中がファイル", file.join("x").join("y")),
+    ] {
+        let err = check_parent_dir(&parent).unwrap_err();
+        assert_eq!(err.code(), ErrorCode::InvalidRoot, "{what}");
+        assert!(
+            err.message().contains("置き場所のフォルダがない"),
+            "{what}: {err}"
+        );
+        assert_eq!(err.detail(), None, "{what}: {err}");
+        common::assert_no_absolute_path(&err);
+        assert_eq!(names(dir.path()), before, "{what}: 何も作らない");
+    }
+    assert_eq!(fs::read(&file).unwrap(), b"keep");
+}
+
+/// `check_parent_dir`：ジャンクションは、先がフォルダなら通す（先を守る場所と判定するのは `Vault::init`）。
+/// 先がなくなった（宙ぶらりんの）ジャンクションは、ないものとして INVALID_ROOT。
+#[cfg(windows)]
+#[test]
+fn check_parent_dir_follows_junctions() {
+    use common::junction;
+
+    let dir = TestDir::new("parent-dir-junction");
+    let target = dir.join("target-dir");
+    fs::create_dir(&target).unwrap();
+    let link = dir.join("link");
+    if !junction(&link, &target) {
+        return;
+    }
+    check_parent_dir(&link).unwrap();
+    // 先を消す（空のフォルダ）と、宙ぶらりんのリンクになる（リンクは、TestDir の Drop が、先をたどらずに消す）
+    fs::remove_dir(&target).unwrap();
+    expect_code(
+        check_parent_dir(&link),
+        ErrorCode::InvalidRoot,
+        "宙ぶらりんのジャンクション",
+    );
+}
+
+/// フォルダの中の名前の一覧（並べ替えたもの）。
+fn names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
 }

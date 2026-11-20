@@ -1,12 +1,14 @@
-# ワークスペースの構成：crates/ の下に 1 クレートずつ（vault-core・vault-mcp・vault-ffi・mcp-proto・json-guard・os-sys）。
+# ワークスペースの構成：crates/ の下に 1 クレートずつ置く。members は crates/* なので、置いたクレートがそのままメンバーになる。
 # license は AGPL-3.0-only（2026-11-17 決定。各クレートは license.workspace で受け継ぐ）。
 # [profile.release] に panic = "abort" を書かない（FFI の catch_unwind を効かせるため）。
+# version は配る版（X.Y.Z）。app/pubspec.yaml の version と同じにする（scripts/build-release.sh は違えば止まる）。
 
 [workspace]
 members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
 license = "AGPL-3.0-only"

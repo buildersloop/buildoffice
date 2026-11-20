@@ -2,7 +2,8 @@ THIRD_PARTY_LICENSES — 他社のソフトウェアのライセンス表示
 
 このリポジトリが使う外部の Rust のクレート（Cargo.lock にある 11 個）の、名前・版・ライセンス・著作権表示です。
 すべて、serde・serde_json と、それらが連れてくる依存です。
-Rust の標準ライブラリと、画面のアプリ（Flutter）とその部品は、あとの節に書きました。
+Rust の標準ライブラリと、画面のアプリ（Flutter）とその部品、プログラムに組み込んだ C/C++ のランタイム、
+Windows のインストーラーを作る Inno Setup は、あとの節に書きました。
 
 - ライセンスの文は、各クレートの配布物（crates.io から取った ~/.cargo/registry/src/ の LICENSE ファイル）から、そのまま写しました。
 - 複数のライセンスから選べるもの（「MIT OR Apache-2.0」「Unlicense OR MIT」）は、MIT を選び、その文を載せています。
@@ -738,3 +739,71 @@ LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
 ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+================================================================================
+C/C++ のランタイム（静的に組み込み）/ The C and C++ runtime libraries (statically linked)
+================================================================================
+vault-mcp.exe・vault_ffi.dll・vault_app.exe は、Windows の C/C++ のコンパイラー（MSVC。Visual Studio の
+Build Tools）に付いている C ランタイム（vcruntime と Universal C Runtime）と C++ の標準ライブラリを、
+静的に組み込んで作っています。別に入れるランタイムのパッケージ（VCRUNTIME140.dll など）がない PC でも
+動くようにするためです。これらのライブラリは Microsoft のもので、Visual Studio のライセンスの条項の範囲で、
+作ったプログラムに組み込んで配っています。
+
+vault-mcp.exe, vault_ffi.dll and vault_app.exe are built with the C runtime (vcruntime and the Universal C
+Runtime) and the C++ standard library of the MSVC compiler (Visual Studio Build Tools) statically linked in,
+so that they start on a PC where the separate runtime package (for example VCRUNTIME140.dll) is not
+installed. These libraries are provided by Microsoft and are redistributed as part of the programs under
+the terms of the Visual Studio license.
+
+================================================================================
+Inno Setup 6.7.3（Windows のインストーラー）/ Inno Setup 6.7.3 (the Windows installer)
+================================================================================
+Windows のインストーラー（Buildoffice-<版>-windows-x64-setup.exe）は、Inno Setup 6.7.3 で作っています。
+setup.exe と、入れたあとにできるアンインストーラー（unins000.exe）には、Inno Setup のプログラムが入っています。
+インストーラーの画面の文（英語と日本語）は、Inno Setup に付いている訳を使い、一部の文（完了の画面と
+アンインストールの確認）だけを書き換えています。
+ライセンス：Inno Setup License（下の全文。Inno Setup 6.7.3 の配布物の license.txt から、そのまま写しました）
+著作権表示：Copyright (C) 1997-2026 Jordan Russell. Portions Copyright (C) 2000-2026 Martijn Laan.
+Web サイト：https://jrsoftware.org/
+
+The Windows installer (Buildoffice-<version>-windows-x64-setup.exe) is built with Inno Setup 6.7.3. The
+setup program and the uninstaller that it installs (unins000.exe) contain Inno Setup code. The installer's
+screens use the English and Japanese messages that come with Inno Setup; only a few messages (the finish
+page and the uninstall confirmation) are replaced. Inno Setup is licensed under the Inno Setup License
+below (copied as is from license.txt of the Inno Setup 6.7.3 distribution). Copyright (C) 1997-2026 Jordan
+Russell. Portions Copyright (C) 2000-2026 Martijn Laan. Web site: https://jrsoftware.org/
+
+----- Inno Setup License (license.txt) -----
+
+Inno Setup License
+==================
+
+Except where otherwise noted, all of the documentation and software included in the Inno
+Setup package is copyrighted by Jordan Russell.
+
+Copyright (C) 1997-2026 Jordan Russell. All rights reserved.
+Portions Copyright (C) 2000-2026 Martijn Laan. All rights reserved.
+
+This software is provided "as-is," without any express or implied warranty. In no event shall
+the author be held liable for any damages arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose, including commercial
+applications, and to alter and redistribute it, provided that the following conditions are met:
+
+1. All redistributions of source code files must retain all copyright notices that are currently
+   in place, and this list of conditions without modification.
+
+2. All redistributions in binary form must retain all occurrences of the above copyright notice
+   and web site addresses that are currently in place (for example, in the About boxes).
+
+3. The origin of this software must not be misrepresented; you must not claim that you wrote
+   the original software. If you use this software to distribute a product, an acknowledgment
+   in the product documentation would be appreciated but is not required.
+
+4. Modified versions in source or binary form must be plainly marked as such, and must not
+   be misrepresented as being the original software.
+
+
+Jordan Russell
+jr-2020 AT jrsoftware.org
+https://jrsoftware.org/

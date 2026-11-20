@@ -1,4 +1,4 @@
-//! ハンドルでフォルダの中を列挙する（W1。GetFileInformationByHandleEx）。
+//! ハンドルでフォルダの中を列挙する（GetFileInformationByHandleEx）。
 //!
 //! - FileIdExtdDirectoryInfo（19・20）を先に使い、最初の呼び出しで 87・50・1 が返ったときだけ
 //!   FileFullDirectoryInfo（14・15）に切り替える。切り替えたことは覚えず、フォルダごとに最初の呼び出しで決める。

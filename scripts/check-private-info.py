@@ -15,7 +15,8 @@ Files that start with the gzip signature (for example the app's NOTICES.Z) are d
 content is searched in the same way.
 
 With `--text-rules` it also reports e-mail addresses and UUIDs (except the UUIDs in files listed in
-ALLOWED_UUID_FILES, which are public operating system identifiers).
+ALLOWED_UUID_FILES, which are public operating system identifiers, and the single UUIDs listed in
+ALLOWED_UUIDS for a file: the installer's application id, which is public on purpose).
 
 With `--forbidden-file FILE` it also reports the words listed in FILE (one regular expression per
 line; blank lines and lines that start with # are ignored; a line that starts with "text:" is searched
@@ -42,6 +43,13 @@ ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_UUID_FILES = {
     "crates/os-sys/src/win/ffi.rs",
     "app/windows/runner/runner.exe.manifest",
+}
+
+# A UUID that is public on purpose, in one file only (the same value in any other file is reported):
+# the installer's application id (the setup.exe and the uninstall entry carry it). The value is written
+# in two halves, so that this file does not contain a UUID itself (it is searched like the other files).
+ALLOWED_UUIDS = {
+    "installer/buildoffice.iss": frozenset({"952e14be-eef3-4c9a-" + "b454-d5555e71b1b3"}),
 }
 
 DRIVE_USERS = re.compile(rb"(?i)[a-z]:(?:\\|/)+users(?:\\|/)")
@@ -166,7 +174,7 @@ def forbidden_views(data, rules):
     return out
 
 
-def scan(data, words, text_rules, allow_uuid, prefix=""):
+def scan(data, words, text_rules, allow_uuid, prefix="", allowed_uuids=frozenset()):
     hits = []
     low = data.lower()
     for word in words:
@@ -189,18 +197,21 @@ def scan(data, words, text_rules, allow_uuid, prefix=""):
                 hits.append(f"{prefix}{label}: e-mail {m.decode('ascii', 'replace')!r}")
             if not allow_uuid:
                 for m in sorted(set(UUID.findall(blob))):
+                    if m.decode("ascii").lower() in allowed_uuids:
+                        continue
                     hits.append(f"{prefix}{label}: uuid {m.decode('ascii', 'replace')!r}")
     return hits
 
 
 def scan_file(rel, data, words, text_rules, rules):
-    hits = scan(data, words, text_rules, rel in ALLOWED_UUID_FILES)
+    allowed = ALLOWED_UUIDS.get(rel, frozenset())
+    hits = scan(data, words, text_rules, rel in ALLOWED_UUID_FILES, allowed_uuids=allowed)
     if SECRET_NAME.match(rel.rsplit("/", 1)[-1]):
         hits.append("file name looks like a secret")
     inner = gunzip(data)
     contents = [("", data)]
     if inner is not None:
-        hits += scan(inner, words, text_rules, rel in ALLOWED_UUID_FILES, prefix="gzip/")
+        hits += scan(inner, words, text_rules, rel in ALLOWED_UUID_FILES, prefix="gzip/", allowed_uuids=allowed)
         contents.append(("gzip/", inner))
     if rules:
         for rx, _text_only in rules:

@@ -192,7 +192,7 @@ impl<'a> Txn<'a> {
             loaded,
             ..
         } = self;
-        let committed = journal.commit();
+        let committed = journal.commit(&root, |_| {});
         index::apply(&root, &vault, lock, loaded, index);
         match (result, committed) {
             (Ok(value), Ok(())) => Ok(value),
@@ -216,7 +216,7 @@ impl<'a> Txn<'a> {
             ..
         } = self;
         debug_assert!(index.is_empty(), "走査は、索引の変更をためない");
-        journal.commit()?;
+        journal.commit(&root, |_| {})?;
         if let Some(replacement) = replacement {
             index::replace_encoded(&root, &vault, lock, replacement);
         }

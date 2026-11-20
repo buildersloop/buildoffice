@@ -2,7 +2,7 @@
 
 ## English
 
-Buildoffice 0.1.0 is a preview release. If you find a security problem (a vulnerability), please report
+Buildoffice 0.2.0 is a preview release. If you find a security problem (a vulnerability), please report
 it privately with GitHub's **Private vulnerability reporting**: open this repository's **Security** tab
 and choose **Report a vulnerability**.
 
@@ -14,7 +14,7 @@ real private data (use a test vault). This is a preview, so no response time is 
 
 ## 日本語
 
-Buildoffice 0.1.0 はプレビュー版です。セキュリティの問題（脆弱性）を見つけたときは、GitHub の
+Buildoffice 0.2.0 はプレビュー版です。セキュリティの問題（脆弱性）を見つけたときは、GitHub の
 **Private vulnerability reporting** で、非公開で知らせてください。このリポジトリの **Security** タブを開き、
 **Report a vulnerability** を選びます。
 

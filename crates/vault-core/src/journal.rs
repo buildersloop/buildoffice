@@ -3,7 +3,8 @@
 //! - 追記だけ。1行に1つの JSON（`{"seq","ts","actor":{"kind","id","session"},"op","path","to","trash_id","size"}`）。
 //! - seq は、ロックを持った状態で、最後の履歴ファイルを末尾からさかのぼり、最後に読める行の seq に1を足したもの。
 //! - ファイルが改行で終わっていなければ、先に改行を書いてから追記する（壊れた行を1行に閉じ込める）。
-//! - 8 MiB を超えたら、次のファイルに分ける。
+//! - 8 MiB を超えたら、次のファイルに分ける。最後のファイルがほかの名前とハードリンクでつながっていれば、そのファイル
+//!   には書かず、次のファイルに切り替える（a3）。
 //!
 //! 書き方：ツールの呼び出しの最初に `JournalWriter::open` で履歴のファイルを開いて seq を決め（書けることを確かめる）、
 //! 操作のあいだに `push` で行をためて、最後に `commit` で1回の書き込みと1回の sync で書く。
@@ -27,6 +28,8 @@ use crate::vault::VaultLock;
 pub(crate) const JOURNAL_DIR: &str = "journal";
 /// 1つの履歴ファイルの大きさの目安。これ以上なら次のファイルに分ける。
 pub const MAX_JOURNAL_FILE_BYTES: u64 = 8 * 1024 * 1024;
+/// 書く直前に新しい履歴のファイルへ切り替えるとき、ふさがっている名前を飛ばして試す名前の数。
+const MAX_SWITCH_NAMES: usize = 8;
 /// 末尾からさかのぼるときに、最初に読む大きさ（足りなければ倍にする）。
 const TAIL_WINDOW: u64 = 64 * 1024;
 
@@ -77,25 +80,32 @@ pub(crate) struct Record {
 
 /// 履歴に書くもの。ロックを持っていること（`_lock`）が条件。
 ///
-/// 履歴のフォルダ（`_dir`）と履歴のファイルを commit まで持つ。フォルダは持っているあいだ名前を変えられず
+/// 履歴のフォルダ（`dir`）と履歴のファイルを commit まで持つ。フォルダは持っているあいだ名前を変えられず
 /// ファイルは DELETE を共有しないので、同じユーザーのほかのプロセスも、書いているあいだ
 /// 履歴のファイルの名前を変える・消すことができない。
+///
+/// 履歴の追記は、その場で中身を書く唯一の道。書くファイルがほかの名前とハードリンクでつながっていれば（開いたとき・
+/// 書く直前の2回、同じハンドルで読む）、そのファイルには書かず、新しい履歴のファイルに切り替える（ハードリンクで残すバックアップの写しを書き換えない）。
 pub(crate) struct JournalWriter<'a> {
-    _dir: Held,
+    dir: Held,
     file: File,
+    /// 書くファイルの名前の seq（そのファイルの最初の seq）。書く直前に切り替えるとき、名前がぶつからないように使う。
+    file_seq: u64,
     /// open で新しく作った履歴のファイルの記録（init の片づけ）。
     created: Option<guard::Made>,
     next_seq: u64,
     needs_newline: bool,
-    pending: Vec<u8>,
+    /// ためた行（commit で JSON にする。書く直前に切り替えて seq を付け直すことがあるため）。
+    pending: Vec<JournalEntry>,
     _lock: &'a VaultLock,
 }
 
 impl<'a> JournalWriter<'a> {
     /// 履歴のファイルを開き、次の seq を決める（操作の前に、履歴に書けることを確かめる）。
     ///
-    /// 最後のファイルが 8 MiB 以上なら、次のファイルを作る。その名前が最後のファイルとぶつからないように、
-    /// 最後のファイルに読める行が1つもないときは、seq をそのファイルの最初の seq より1つ進める。
+    /// 最後のファイルが 8 MiB 以上か、ほかの名前とハードリンクでつながっていれば、そのファイルには
+    /// 書かず、次のファイルを作る。その名前が最後のファイルとぶつからないように、最後のファイルに読める行が1つも
+    /// ないときは、seq をそのファイルの最初の seq より1つ進める。リンクの数を読めなければ IO_ERROR（書かない）。
     ///
     /// 履歴のフォルダは、`.vault` のハンドル（`vault`）を基準に、リンクをたどらずに開く（ないなら作って開き直す）。
     /// ファイルの名前の一覧は、持っている履歴のフォルダのハンドルで列挙し、選んだ名前もそのフォルダを基準に開く。
@@ -114,6 +124,8 @@ impl<'a> JournalWriter<'a> {
             return Self::new_file(root, dir, 1, lock);
         };
         let mut file = guard::open_journal_file(&dir, name)?;
+        // 開いたハンドルで、ほかの名前とつながっていないかを読む（書くのも同じハンドル）
+        let linked = guard::journal_is_linked(&file)?;
         let len = file
             .metadata()
             .map_err(|e| VaultError::io("履歴を調べられない", &e))?
@@ -121,15 +133,16 @@ impl<'a> JournalWriter<'a> {
         let last = last_readable(&mut file, len)?.unwrap_or(0);
         // 最後のファイルに読める行がなくても、ファイルの名前の seq より前に戻らない
         let next = next_after(last.max(first_seq.saturating_sub(1)))?;
-        if len >= MAX_JOURNAL_FILE_BYTES {
+        if linked || len >= MAX_JOURNAL_FILE_BYTES {
             drop(file);
             let seq = next.max(next_after(*first_seq)?);
             return Self::new_file(root, dir, seq, lock);
         }
         let needs_newline = len > 0 && !ends_with_newline(&mut file, len)?;
         Ok(Self {
-            _dir: dir,
+            dir,
             file,
+            file_seq: *first_seq,
             created: None,
             next_seq: next,
             needs_newline,
@@ -140,10 +153,17 @@ impl<'a> JournalWriter<'a> {
 
     fn new_file(root: &Root, dir: Held, seq: u64, lock: &'a VaultLock) -> Result<Self> {
         let name = ManagedName::journal_file(seq);
-        let (file, made) = guard::create_journal_file(root, &dir, &name)?;
+        // 操作の前なので、名前がふさがっていれば、何も変えずにエラーで止める（今までと同じ）
+        let Some((file, made)) = guard::create_journal_file(root, &dir, &name)? else {
+            return Err(VaultError::new(
+                ErrorCode::IoError,
+                "履歴のファイルを作れない（同じ名前のものがすでにある）",
+            ));
+        };
         Ok(Self {
-            _dir: dir,
+            dir,
             file,
+            file_seq: seq,
             created: Some(made),
             next_seq: seq,
             needs_newline: false,
@@ -157,13 +177,13 @@ impl<'a> JournalWriter<'a> {
         self.created.take()
     }
 
-    /// 1行をためる。返り値は付けた seq。
+    /// 1行をためる。返り値は付けた seq（書く直前に新しいファイルへ切り替えるときは、付け直すことがある）。
     pub fn push(&mut self, actor: &Actor, op: Op, record: Record) -> Result<u64> {
         let seq = self.next_seq;
         let next = next_after(seq)?;
         let ts = time::format_unix_millis(time::now_unix_millis())
             .ok_or_else(|| VaultError::new(ErrorCode::Internal, "今の時刻を書けない"))?;
-        let entry = JournalEntry {
+        self.pending.push(JournalEntry {
             seq,
             ts,
             actor: actor.clone(),
@@ -172,25 +192,60 @@ impl<'a> JournalWriter<'a> {
             to: record.to,
             trash_id: record.trash_id,
             size: record.size,
-        };
-        let line = serde_json::to_vec(&entry)
-            .map_err(|_| VaultError::new(ErrorCode::Internal, "履歴の行を作れない"))?;
-        self.pending.extend_from_slice(&line);
-        self.pending.push(b'\n');
+        });
         self.next_seq = next;
         Ok(seq)
     }
 
     /// ためた行を、1回の書き込みと1回の sync で書く。ためた行がなければ何もしない。
-    pub fn commit(mut self) -> Result<()> {
+    ///
+    /// 書く直前に、同じハンドルでリンクの数を読み直す（開いたあとでハードリンクを足されたとき）。つながっていれば、
+    /// そのファイルには書かず、ためた行の最初の seq の名前で新しい履歴のファイルを作って書く。その名前が今のファイルの
+    /// 名前とぶつかる（今のファイルに読める行がなかった）ときは、open の切り替えと同じく、今のファイルの最初の seq より
+    /// 1つ進めた seq から付け直す。操作は済んでいるので、作る名前がすでにふさがっていれば（ほかのプロセスが先に置いた）、
+    /// seq を1つずつ進めて `MAX_SWITCH_NAMES` 個の名前まで作り直す（上書きはしない。行の seq も付け直す）。
+    /// 新しく作ったファイルの記録は `on_created` に渡す（init の片づけ）。リンクの数を読めなければ IO_ERROR（書かない）。
+    pub fn commit(mut self, root: &Root, on_created: impl FnOnce(guard::Made)) -> Result<()> {
         if self.pending.is_empty() {
             return Ok(());
         }
+        if guard::journal_is_linked(&self.file)? {
+            let mut start = self.pending[0].seq.max(next_after(self.file_seq)?);
+            let mut created = None;
+            for _ in 0..MAX_SWITCH_NAMES {
+                let name = ManagedName::journal_file(start);
+                if let Some(made) = guard::create_journal_file(root, &self.dir, &name)? {
+                    created = Some(made);
+                    break;
+                }
+                start = next_after(start)?;
+            }
+            let Some((file, made)) = created else {
+                return Err(VaultError::new(
+                    ErrorCode::IoError,
+                    "履歴のファイルを作れない（切り替える先の名前が、どれもすでにある）",
+                ));
+            };
+            let mut seq = start;
+            for entry in &mut self.pending {
+                entry.seq = seq;
+                seq = next_after(seq)?;
+            }
+            on_created(made);
+            self.file = file;
+            self.needs_newline = false;
+        }
+        let mut bytes = Vec::new();
         if self.needs_newline {
-            self.pending.insert(0, b'\n');
+            bytes.push(b'\n');
+        }
+        for entry in &self.pending {
+            serde_json::to_writer(&mut bytes, entry)
+                .map_err(|_| VaultError::new(ErrorCode::Internal, "履歴の行を作れない"))?;
+            bytes.push(b'\n');
         }
         self.file
-            .write_all(&self.pending)
+            .write_all(&bytes)
             .and_then(|()| self.file.sync_data())
             .map_err(|e| io_or_disk_full("履歴に書けない", &e))
     }

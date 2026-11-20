@@ -3,6 +3,8 @@
 //! - stdout は MCP のメッセージだけに使う。使い方・誤り・ログは stderr に出す。
 //! - stderr には、絶対パスを出さない（MCP のクライアントは、サーバーの stderr をログに残すため）。
 //! - panic の文は stderr に出さない（決まった1行だけ。ログはメソッド名・ツール名・コード・時間だけ）。
+//!   panic の知らせとログの1行は safe-log で書く。使い方・誤り・init と open の結果は、コマンドの案内
+//!   （画面の文）として、このファイルだけで書く（ソースの検査の許可リスト）。
 //! - 終了コード：0 ＝ 正常（stdin の EOF・init の成功・--help）、1 ＝ 保管庫を開けない・作れない・入出力のエラー、
 //!   2 ＝ 引数の誤り。
 #![forbid(unsafe_code)]
@@ -10,12 +12,12 @@
 pub mod args;
 pub mod host;
 
-use std::io::{self, Write};
-use std::panic;
+use std::io;
 use std::path::Path;
 use std::process::ExitCode;
 
 use mcp_proto::{Server, ServerInfo};
+use safe_log::{Line, Name, name};
 use vault_core::{Actor, ErrorCode, ErrorDetail, RootEnv, Vault, VaultError};
 
 use crate::args::{Command, USAGE};
@@ -23,19 +25,16 @@ use crate::host::VaultHost;
 
 /// サーバーの名前（serverInfo）。
 const SERVER_NAME: &str = "vault-mcp";
+/// ログと panic の知らせの書き手の名前。
+const LOG_SOURCE: Name = name!("vault-mcp");
 /// server/discover の instructions。
 const INSTRUCTIONS: &str =
     "保管庫の中のファイルを相対パスで読み書きする。削除と上書きはゴミ箱から戻せる。";
 
 /// プログラムの入口（`main.rs` から呼ぶ）。
 pub fn run() -> ExitCode {
-    // panic の文（場所・中身）は出さない。決まった1行だけ
-    panic::set_hook(Box::new(|_| {
-        let _ = writeln!(
-            io::stderr(),
-            "vault-mcp: 内部のエラー（panic。詳しい文は出さない）"
-        );
-    }));
+    // panic の文（場所・中身）は出さない。決まった1行（「vault-mcp: 内部のエラー（panic。詳しい文は出さない）」）だけ
+    safe_log::set_quiet_panic_hook(LOG_SOURCE, false);
     match args::parse(std::env::args_os().skip(1).collect()) {
         Ok(Command::Help) => {
             eprintln!("{USAGE}");
@@ -85,7 +84,11 @@ fn serve(path: &Path, read_only: bool, actor_id: Option<String>) -> ExitCode {
     match server.serve(io::stdin().lock(), io::stdout().lock(), io::stderr()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("vault-mcp: 入出力のエラーで終わる（{:?}）", e.kind());
+            // エラーの文（io::Error の表示）は書かない。種類の名前だけ
+            let line = Line::new(LOG_SOURCE)
+                .name(name!("event"), name!("io_error"))
+                .io_kind(name!("kind"), e.kind());
+            eprintln!("{line}");
             ExitCode::from(1)
         }
     }

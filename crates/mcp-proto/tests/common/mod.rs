@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use mcp_proto::{CallError, Server, ServerInfo, ToolDef, ToolHost};
+use mcp_proto::{CallError, Name, Server, ServerInfo, ToolDef, ToolHost, name};
 use serde_json::{Value, json};
 
 /// 受付口に届いた呼び出し。
@@ -73,7 +73,22 @@ impl ToolHost for FakeHost {
             _ => Err(CallError::UnknownTool),
         }
     }
+
+    fn log_names(&self) -> &[Name] {
+        FAKE_LOG_NAMES
+    }
 }
+
+/// 偽の受付口のツールの名前と、返すエラーのコード（ログに書いてよい名前）。
+pub const FAKE_LOG_NAMES: &[Name] = &[
+    name!("fake_read"),
+    name!("fake_write"),
+    name!("fake_fail"),
+    name!("fake_panic"),
+    name!("fake_scalar"),
+    name!("READ_ONLY"),
+    name!("NOT_FOUND"),
+];
 
 /// 時間を進められる時計。
 #[derive(Clone)]

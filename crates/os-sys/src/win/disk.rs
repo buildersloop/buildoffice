@@ -1,4 +1,4 @@
-//! 空き容量（W3。GetDiskFreeSpaceExW）。
+//! 空き容量（GetDiskFreeSpaceExW）。
 
 use std::io;
 use std::os::windows::ffi::OsStrExt;

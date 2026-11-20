@@ -1,9 +1,13 @@
 /// 画面のテスト（偽の保管庫で。vault-ffi は使わない）。
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:vault_app/main.dart';
 import 'package:vault_app/src/errors.dart';
+import 'package:vault_app/src/folder_picker.dart';
 import 'package:vault_app/src/pages/browser_page.dart';
 import 'package:vault_app/src/pages/open_page.dart';
 import 'package:vault_app/src/pages/trash_page.dart';
@@ -172,56 +176,651 @@ Future<FakeVault> pumpBrowser(
   return vault;
 }
 
-void main() {
-  testWidgets('パスを入れて開くと、一覧が出る（パスはそのまま vault-core に渡す）', (tester) async {
-    final vault = FakeVault();
-    final opened = <(String, bool, bool)>[];
+/// 偽のフォルダの窓。`results` を順に返す（String はパス、null は取り消し、ほかは投げる）。
+class FakePicker implements FolderPicker {
+  FakePicker(this.results);
+
+  final List<Object?> results;
+  int calls = 0;
+
+  @override
+  Future<String?> pickFolder() async {
+    calls++;
+    final next = results.removeAt(0);
+    if (next == null || next is String) {
+      return next as String?;
+    }
+    throw next;
+  }
+}
+
+/// 開く・作るの呼ばれ方を記録する、開く画面。
+class OpenHarness {
+  final FakeVault vault = FakeVault();
+  final List<(String, bool, bool)> opened = [];
+  final List<(String, String)> created = [];
+
+  /// 作る関数が返すもの（null なら、すぐ [vault] を返す）。
+  Future<VaultApi> Function()? createResult;
+
+  /// 開く関数が返すもの（null なら、すぐ [vault] を返す）。
+  Future<VaultApi> Function()? openResult;
+
+  /// 既定の保管庫を開く関数が返すもの（引数は [vault]）。null のまま呼ばれたら、テストを落とす（OpenPage には既定の
+  /// 値がなく、本物は VaultApp だけが渡すので、ここで本物を呼ぶことはない）。
+  Future<OpenedDefault> Function(FakeVault vault)? defaultResult;
+
+  /// 既定の保管庫を開く関数が呼ばれた回数。
+  int defaultCalls = 0;
+
+  /// 画面が最初にできたときに、既定の保管庫を開くか（OpenPage の既定と同じ false）。
+  bool openDefaultOnStart = false;
+
+  Future<void> pump(WidgetTester tester, {FolderPicker? picker}) async {
+    // 3つのカードが、スクロールせずに全部見える大きさにする
+    tester.view.physicalSize = const Size(1280, 2000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    addTearDown(() {
+      if (defaultResult == null && defaultCalls > 0) {
+        fail('既定の保管庫を開く関数が、呼ばれるはずのないところで呼ばれた');
+      }
+    });
     await tester.pumpWidget(
       MaterialApp(
         home: OpenPage(
           autoRescan: false,
+          picker: picker ?? FakePicker([]),
+          openDefaultOnStart: openDefaultOnStart,
+          defaultOpener: () {
+            defaultCalls++;
+            final result = defaultResult;
+            if (result == null) {
+              return Future<OpenedDefault>.error(
+                StateError('呼ばれるはずのない既定の保管庫を開く関数'),
+              );
+            }
+            return result(vault);
+          },
           opener: ({required root, required init, required readOnly}) async {
             opened.add((root, init, readOnly));
-            return vault;
+            return await openResult?.call() ?? vault;
+          },
+          creator: ({required parent, required name}) async {
+            created.add((parent, name));
+            return await createResult?.call() ?? vault;
           },
         ),
       ),
     );
+  }
+}
+
+/// キーで探して押す。
+Future<void> tapKey(WidgetTester tester, String key) =>
+    tester.tap(find.byKey(Key(key)));
+
+/// ボタンが押せるか。
+bool enabled(WidgetTester tester, String key) {
+  final button = tester.widget<ButtonStyleButton>(find.byKey(Key(key)));
+  return button.onPressed != null;
+}
+
+/// 欄の中の文字。
+String fieldText(WidgetTester tester, String key) =>
+    tester.widget<TextField>(find.byKey(Key(key))).controller!.text;
+
+void openPageTests() {
+  test('アプリの既定は、本物の vault-ffi と OS のフォルダの窓', () {
+    const app = VaultApp();
+    expect(identical(app.opener, openWithFfi), isTrue);
+    expect(identical(app.creator, createWithFfi), isTrue);
+    expect(app.picker, isA<ChannelFolderPicker>());
+  });
+
+  /// 3つのカードのうち「開く」と「新しく作る」の中身を確かめる（「既定の保管庫」のカードは defaultVaultTests で確かめる）。
+  testWidgets('開く画面は3つのカード（既定の保管庫・開く・新しく作る）。欄の既定の値は空', (tester) async {
+    await OpenHarness().pump(tester);
+    expect(find.byKey(const Key('open_card')), findsOneWidget);
+    expect(find.byKey(const Key('create_card')), findsOneWidget);
+    expect(find.byType(SegmentedButton<bool>), findsNothing);
+    for (final key in ['root', 'parent', 'name']) {
+      expect(fieldText(tester, key), isEmpty, reason: key);
+    }
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('create_card')),
+        matching: find.byKey(const Key('create_note')),
+      ),
+      findsOneWidget,
+      reason: '作れない場所の短い説明',
+    );
+    for (final key in ['open', 'create', 'pick_root', 'pick_parent']) {
+      expect(enabled(tester, key), isTrue, reason: key);
+    }
+  });
+
+  testWidgets('パスを入れて開くと、一覧が出る（パスは前後の空白だけを除いて vault-core に渡す。作らない）', (
+    tester,
+  ) async {
+    final harness = OpenHarness();
+    await harness.pump(tester);
     await tester.enterText(
       find.byKey(const Key('root')),
       r'  C:\Vaults\MyVault ',
     );
-    await tester.tap(find.text('作って開く').first);
+    await tapKey(tester, 'read_only');
     await tester.pump();
-    await tester.tap(find.byKey(const Key('open')));
+    await tapKey(tester, 'open');
     await tester.pumpAndSettle();
-    expect(opened, [(r'C:\Vaults\MyVault', true, false)]);
+    expect(harness.opened, [(r'C:\Vaults\MyVault', false, true)]);
+    expect(harness.created, isEmpty);
     expect(find.text('保管庫：MyVault'), findsOneWidget);
     expect(find.text('docs'), findsOneWidget);
     expect(find.text('a.txt'), findsOneWidget);
     // 開いたときに、履歴の最後まで読み進める（rescan:false）
-    expect(vault.calls, contains('changes:0:false'));
+    expect(harness.vault.calls, contains('changes:0:false'));
   });
 
-  testWidgets('開けなければ、コードごとの決まった文を出す', (tester) async {
-    await tester.pumpWidget(
-      MaterialApp(
-        home: OpenPage(
-          autoRescan: false,
-          opener: ({required root, required init, required readOnly}) async =>
-              throw const VaultException(
-                'NOT_A_VAULT',
-                '保管庫でない（.vault/vault.json がない）',
-              ),
-        ),
-      ),
+  testWidgets('置き場所と名前を入れて「作って開く」と、作ってそのまま一覧へ。「保管庫を作った」を知らせ、パスは出さない', (
+    tester,
+  ) async {
+    final harness = OpenHarness();
+    await harness.pump(tester);
+    await tester.enterText(find.byKey(const Key('parent')), '  D:\\Vaults ');
+    await tester.enterText(find.byKey(const Key('name')), ' MyVault  ');
+    await tapKey(tester, 'create');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(harness.created, [(r'D:\Vaults', 'MyVault')]);
+    expect(harness.opened, isEmpty, reason: '作るのは作る関数だけ');
+    expect(find.text('保管庫を作った'), findsOneWidget);
+    await tester.pumpAndSettle();
+    expect(find.text('保管庫：MyVault'), findsOneWidget);
+    expect(find.text('docs'), findsOneWidget);
+    expect(
+      find.textContaining(r'D:\Vaults'),
+      findsNothing,
+      reason: '開いたあとは名前だけ',
     );
+  });
+
+  testWidgets('名前の欄で Enter を押しても作る', (tester) async {
+    final harness = OpenHarness();
+    await harness.pump(tester);
+    await tester.enterText(find.byKey(const Key('parent')), r'D:\Vaults');
+    await tester.enterText(find.byKey(const Key('name')), 'v');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+    expect(harness.created, [(r'D:\Vaults', 'v')]);
+  });
+
+  testWidgets('開けなければ、「開く」のカードに、コードごとの決まった文を出す', (tester) async {
+    final harness = OpenHarness()
+      ..openResult = () async => throw const VaultException(
+        'NOT_A_VAULT',
+        '保管庫でない（.vault/vault.json がない）',
+      );
+    await harness.pump(tester);
     await tester.enterText(find.byKey(const Key('root')), r'C:\x');
-    await tester.tap(find.byKey(const Key('open')));
+    await tapKey(tester, 'open');
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('open_error')), findsOneWidget);
-    expect(find.textContaining('保管庫でない（はじめてなら'), findsOneWidget);
+    expect(find.byKey(const Key('create_error')), findsNothing);
+    expect(find.textContaining('保管庫でない（はじめてなら「新しく作る」で作る）'), findsOneWidget);
   });
+
+  testWidgets('作れなければ、「新しく作る」のカードに決まった文を出す（vault-core の文を添える。例外の文やパスは出さない）', (
+    tester,
+  ) async {
+    final harness = OpenHarness()
+      ..createResult = () async => throw const VaultException(
+        'INVALID_ROOT',
+        '保管庫の名前：末尾が . か空白の要素は使えない',
+      );
+    await harness.pump(tester);
+    await tester.enterText(find.byKey(const Key('parent')), r'D:\Vaults');
+    await tester.enterText(find.byKey(const Key('name')), 'x.');
+    await tapKey(tester, 'create');
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('open_error')), findsNothing);
+    expect(
+      tester.widget<Text>(find.byKey(const Key('create_error'))).data,
+      'その場所・名前では保管庫にできない（保管庫にできる場所を選び、使える名前を付ける）'
+      '：保管庫の名前：末尾が . か空白の要素は使えない',
+    );
+    expect(find.text('保管庫を作った'), findsNothing);
+    expect(
+      find.byKey(const Key('create_card')),
+      findsOneWidget,
+      reason: '画面はそのまま',
+    );
+
+    // VaultException でない例外は、決まった文だけ（元の文の絶対パスを出さない）
+    harness.createResult = () async =>
+        throw StateError(r'cannot load C:\Profiles\someone\vault_ffi.dll');
+    await tapKey(tester, 'create');
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<Text>(find.byKey(const Key('create_error'))).data,
+      unexpectedErrorText,
+    );
+    expect(find.textContaining('someone'), findsNothing);
+    expect(harness.created, hasLength(2));
+  });
+
+  testWidgets('「選ぶ…」：選んだパスが欄に入る。取り消すと変わらない。選べなければ決まった文（元の文は出さない）', (
+    tester,
+  ) async {
+    final picker = FakePicker([
+      r'D:\Picked\Root',
+      null,
+      const FolderPickerException(folderPickerFailedText),
+      r'D:\Picked\Parent',
+      StateError(r'C:\Profiles\someone\secret-folder'),
+      const FolderPickerException(folderPickerUnavailableText),
+    ]);
+    final harness = OpenHarness();
+    await harness.pump(tester, picker: picker);
+
+    await tapKey(tester, 'pick_root');
+    await tester.pumpAndSettle();
+    expect(fieldText(tester, 'root'), r'D:\Picked\Root');
+
+    await tapKey(tester, 'pick_root');
+    await tester.pumpAndSettle();
+    expect(fieldText(tester, 'root'), r'D:\Picked\Root', reason: '取り消すと変わらない');
+    expect(find.byKey(const Key('open_error')), findsNothing);
+
+    await tapKey(tester, 'pick_root');
+    await tester.pumpAndSettle();
+    expect(fieldText(tester, 'root'), r'D:\Picked\Root');
+    expect(
+      tester.widget<Text>(find.byKey(const Key('open_error'))).data,
+      folderPickerFailedText,
+    );
+
+    await tapKey(tester, 'pick_parent');
+    await tester.pumpAndSettle();
+    expect(fieldText(tester, 'parent'), r'D:\Picked\Parent');
+    expect(fieldText(tester, 'name'), isEmpty, reason: '名前は選ばない');
+    expect(
+      find.byKey(const Key('open_error')),
+      findsNothing,
+      reason: '次の操作で消える',
+    );
+
+    await tapKey(tester, 'pick_parent');
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<Text>(find.byKey(const Key('create_error'))).data,
+      folderPickerFailedText,
+    );
+    expect(find.textContaining('secret-folder'), findsNothing);
+    expect(fieldText(tester, 'parent'), r'D:\Picked\Parent');
+
+    await tapKey(tester, 'pick_parent');
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<Text>(find.byKey(const Key('create_error'))).data,
+      folderPickerUnavailableText,
+    );
+    expect(picker.calls, 6);
+    expect(harness.opened, isEmpty, reason: '選ぶだけでは開かない');
+    expect(harness.created, isEmpty, reason: '選ぶだけでは作らない');
+  });
+
+  testWidgets('処理中は、どのボタンも押せない（二度押ししても作るのは1回）', (tester) async {
+    final pending = Completer<VaultApi>();
+    final harness = OpenHarness()..createResult = () => pending.future;
+    await harness.pump(tester);
+    await tester.enterText(find.byKey(const Key('parent')), r'D:\Vaults');
+    await tester.enterText(find.byKey(const Key('name')), 'v');
+    await tapKey(tester, 'create');
+    await tester.pump();
+    for (final key in [
+      'open',
+      'create',
+      'pick_root',
+      'pick_parent',
+      'open_default',
+    ]) {
+      expect(enabled(tester, key), isFalse, reason: key);
+    }
+    await tapKey(tester, 'create');
+    await tapKey(tester, 'open');
+    await tester.pump();
+    expect(harness.created, hasLength(1));
+    expect(harness.opened, isEmpty);
+    pending.complete(harness.vault);
+    await tester.pumpAndSettle();
+    expect(find.text('保管庫：MyVault'), findsOneWidget);
+    expect(harness.created, hasLength(1));
+  });
+
+  testWidgets('窓を出しているあいだも、ほかのボタンは押せない', (tester) async {
+    final pending = Completer<String?>();
+    final picker = _PendingPicker(pending);
+    final harness = OpenHarness();
+    await harness.pump(tester, picker: picker);
+    await tapKey(tester, 'pick_parent');
+    await tester.pump();
+    for (final key in ['open', 'create', 'pick_root', 'pick_parent']) {
+      expect(enabled(tester, key), isFalse, reason: key);
+    }
+    await tapKey(tester, 'pick_parent');
+    await tester.pump();
+    expect(picker.calls, 1);
+    pending.complete(r'D:\Vaults');
+    await tester.pumpAndSettle();
+    expect(fieldText(tester, 'parent'), r'D:\Vaults');
+    expect(enabled(tester, 'create'), isTrue);
+  });
+}
+
+/// 既定の保管庫のカード。
+void defaultVaultTests() {
+  test('アプリの既定は、起動で本物の vault-ffi の既定の保管庫を開く（作るだけで、画面は出さない）', () {
+    const app = VaultApp();
+    expect(identical(app.defaultOpener, openDefaultWithFfi), isTrue);
+    expect(app.openDefaultOnStart, isTrue);
+  });
+
+  testWidgets('起動で1回呼び、作ったら一覧へ移り、「作った」を知らせる', (tester) async {
+    final harness = OpenHarness()
+      ..openDefaultOnStart = true
+      ..defaultResult = (vault) async =>
+          OpenedDefault(api: vault, created: true);
+    await harness.pump(tester);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(harness.defaultCalls, 1);
+    expect(find.text(defaultCreatedText), findsOneWidget);
+    expect(defaultCreatedText, '保管庫を作った（ホームのフォルダの中の Buildoffice）');
+    await tester.pumpAndSettle();
+    expect(find.text('保管庫：MyVault'), findsOneWidget);
+    expect(harness.defaultCalls, 1, reason: '起動の1回だけ');
+    expect(harness.opened, isEmpty);
+    expect(harness.created, isEmpty);
+  });
+
+  testWidgets('作らずに開いた（created:false）ときは、知らせを出さずに一覧へ', (tester) async {
+    final harness = OpenHarness()
+      ..openDefaultOnStart = true
+      ..defaultResult = (vault) async =>
+          OpenedDefault(api: vault, created: false);
+    await harness.pump(tester);
+    await tester.pumpAndSettle();
+    expect(harness.defaultCalls, 1);
+    expect(find.text('保管庫：MyVault'), findsOneWidget);
+    expect(find.text(defaultCreatedText), findsNothing);
+    expect(find.byType(SnackBar), findsNothing);
+  });
+
+  testWidgets('NOT_A_VAULT・INVALID_ROOT なら開く画面に残り、既定のカードに理由が出る。ほかのカードは使える', (
+    tester,
+  ) async {
+    final harness = OpenHarness()
+      ..openDefaultOnStart = true
+      ..defaultResult = (vault) async => throw const VaultException(
+        'NOT_A_VAULT',
+        '保管庫でない（.vault/vault.json がない）',
+      );
+    await harness.pump(tester);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('default_card')), findsOneWidget);
+    expect(
+      tester.widget<Text>(find.byKey(const Key('default_error'))).data,
+      '$defaultErrorHead$defaultNotAVaultText',
+    );
+    expect(find.byKey(const Key('open_error')), findsNothing);
+    expect(find.byKey(const Key('create_error')), findsNothing);
+    for (final key in [
+      'open_default',
+      'open',
+      'create',
+      'pick_root',
+      'pick_parent',
+    ]) {
+      expect(enabled(tester, key), isTrue, reason: key);
+    }
+    // ほかのカードで開ける
+    await tester.enterText(find.byKey(const Key('root')), r'D:\Vaults\Other');
+    await tapKey(tester, 'open');
+    await tester.pumpAndSettle();
+    expect(harness.opened, [(r'D:\Vaults\Other', false, false)]);
+    expect(find.text('保管庫：MyVault'), findsOneWidget);
+  });
+
+  testWidgets('INVALID_ROOT なら、決まった文に vault-core の説明の文（パスを含まない）を添える', (
+    tester,
+  ) async {
+    final harness = OpenHarness()
+      ..openDefaultOnStart = true
+      ..defaultResult = (vault) async => throw const VaultException(
+        'INVALID_ROOT',
+        '既定の保管庫の場所がリンク（ジャンクション・シンボリックリンク）になっているので、たどらない（作らない・開かない）',
+      );
+    await harness.pump(tester);
+    await tester.pumpAndSettle();
+    expect(find.text('保管庫：MyVault'), findsNothing, reason: '開く画面に残る');
+    expect(
+      tester.widget<Text>(find.byKey(const Key('default_error'))).data,
+      '$defaultErrorHead$defaultInvalidRootText'
+      '：既定の保管庫の場所がリンク（ジャンクション・シンボリックリンク）になっているので、たどらない（作らない・開かない）',
+    );
+    expect(enabled(tester, 'open_default'), isTrue);
+  });
+
+  testWidgets('VaultException でない例外は、決まった文だけ（元の文の絶対パスを出さない）', (tester) async {
+    final harness = OpenHarness()
+      ..openDefaultOnStart = true
+      ..defaultResult = (vault) async =>
+          throw StateError(r'cannot load C:\Profiles\someone\vault_ffi.dll');
+    await harness.pump(tester);
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<Text>(find.byKey(const Key('default_error'))).data,
+      '$defaultErrorHead$unexpectedErrorText',
+    );
+    expect(find.textContaining('someone'), findsNothing);
+    expect(find.textContaining('vault_ffi.dll'), findsNothing);
+  });
+
+  testWidgets('開いているあいだは「既定の保管庫を開く」を押せず、二度押ししても呼ぶのは1回', (tester) async {
+    final pending = Completer<OpenedDefault>();
+    final harness = OpenHarness()..defaultResult = (vault) => pending.future;
+    await harness.pump(tester);
+    expect(enabled(tester, 'open_default'), isTrue);
+    await tapKey(tester, 'open_default');
+    await tester.pump();
+    expect(enabled(tester, 'open_default'), isFalse);
+    expect(find.byKey(const Key('default_busy')), findsOneWidget);
+    await tapKey(tester, 'open_default');
+    await tester.pump();
+    expect(harness.defaultCalls, 1);
+    pending.complete(OpenedDefault(api: harness.vault, created: false));
+    await tester.pumpAndSettle();
+    expect(find.text('保管庫：MyVault'), findsOneWidget);
+    expect(harness.defaultCalls, 1);
+  });
+
+  testWidgets('ほかのカードの処理中は「既定の保管庫を開く」も押せない', (tester) async {
+    final pending = Completer<VaultApi>();
+    final harness = OpenHarness()..openResult = () => pending.future;
+    await harness.pump(tester);
+    await tester.enterText(find.byKey(const Key('root')), r'D:\Vaults\v');
+    await tapKey(tester, 'open');
+    await tester.pump();
+    expect(enabled(tester, 'open_default'), isFalse);
+    await tapKey(tester, 'open_default');
+    await tester.pump();
+    expect(harness.defaultCalls, 0);
+    pending.complete(harness.vault);
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('閉じて開く画面へ戻っても、自動では開き直さない。ボタンでもう一度開ける', (tester) async {
+    final harness = OpenHarness()
+      ..openDefaultOnStart = true
+      ..defaultResult = (vault) async =>
+          OpenedDefault(api: vault, created: false);
+    await harness.pump(tester);
+    await tester.pumpAndSettle();
+    expect(harness.defaultCalls, 1);
+    await tapKey(tester, 'close');
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('default_card')), findsOneWidget);
+    expect(harness.vault.calls.where((c) => c == 'close'), hasLength(1));
+    await tester.pump(const Duration(seconds: 5));
+    expect(harness.defaultCalls, 1, reason: '戻ったときは開き直さない');
+    expect(enabled(tester, 'open_default'), isTrue);
+    await tapKey(tester, 'open_default');
+    await tester.pumpAndSettle();
+    expect(harness.defaultCalls, 2);
+    expect(find.text('保管庫：MyVault'), findsOneWidget);
+  });
+
+  testWidgets('openDefaultOnStart が false（OpenPage の既定）なら呼ばない', (tester) async {
+    final harness = OpenHarness();
+    await harness.pump(tester);
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 5));
+    expect(harness.defaultCalls, 0);
+    expect(find.byKey(const Key('default_card')), findsOneWidget);
+    expect(find.byKey(const Key('default_busy')), findsNothing);
+  });
+
+  testWidgets('既定のカードの文に絶対パスがない。説明と、保管庫でないときの直し方の文がある', (tester) async {
+    final harness = OpenHarness()
+      ..defaultResult = (vault) async => throw const VaultException(
+        'NOT_A_VAULT',
+        '保管庫でない（.vault/vault.json がない）',
+      );
+    await harness.pump(tester);
+    await tapKey(tester, 'open_default');
+    await tester.pumpAndSettle();
+    final texts = tester
+        .widgetList<Text>(
+          find.descendant(
+            of: find.byKey(const Key('default_card')),
+            matching: find.byType(Text),
+          ),
+        )
+        .map((t) => t.data ?? '')
+        .toList();
+    expect(texts, contains('既定の保管庫'));
+    expect(texts, contains('既定の保管庫を開く'));
+    expect(texts, contains(defaultCardText));
+    expect(defaultCardText, contains('起動のたびに開く'));
+    expect(defaultCardText, contains('消しても次の起動で作り直す'));
+    expect(defaultCardText, contains('Buildoffice'));
+    final error = tester
+        .widget<Text>(find.byKey(const Key('default_error')))
+        .data!;
+    expect(error, contains('名前を変えるか中身をほかへ移してから、もう一度押す'));
+    final all = [
+      ...texts,
+      defaultCreatedText,
+      defaultNotAVaultText,
+      defaultInvalidRootText,
+      defaultErrorHead,
+    ];
+    for (final text in all) {
+      expect(text, isNot(matches(RegExp(r'[A-Za-z]:[\\/]'))), reason: text);
+      expect(text, isNot(contains(r'\\')), reason: text);
+      expect(text, isNot(contains('%USERPROFILE%')), reason: text);
+      expect(text, isNot(contains('/Users/')), reason: text);
+    }
+  });
+
+  testWidgets('起動の呼び出しが終わる前に画面が消えたら、返ってきた保管庫を閉じる', (tester) async {
+    final pending = Completer<OpenedDefault>();
+    final harness = OpenHarness()
+      ..openDefaultOnStart = true
+      ..defaultResult = (vault) => pending.future;
+    await harness.pump(tester);
+    await tester.pump();
+    expect(harness.defaultCalls, 1);
+    await tester.pumpWidget(const SizedBox());
+    pending.complete(OpenedDefault(api: harness.vault, created: true));
+    await tester.pumpAndSettle();
+    expect(harness.vault.calls, ['close']);
+  });
+
+  testWidgets('起動の呼び出しのあいだも「開く」「新しく作る」は使える。ほかを開いたあとに返った既定の保管庫は閉じる', (
+    tester,
+  ) async {
+    final pending = Completer<OpenedDefault>();
+    final late = FakeVault();
+    final harness = OpenHarness()
+      ..openDefaultOnStart = true
+      ..defaultResult = (vault) => pending.future;
+    await harness.pump(tester);
+    await tester.pump();
+    expect(harness.defaultCalls, 1);
+    expect(enabled(tester, 'open_default'), isFalse);
+    for (final key in ['open', 'create', 'pick_root', 'pick_parent']) {
+      expect(enabled(tester, key), isTrue, reason: key);
+    }
+    await tester.enterText(find.byKey(const Key('root')), r'D:\Vaults\Other');
+    await tapKey(tester, 'open');
+    await tester.pumpAndSettle();
+    expect(find.text('保管庫：MyVault'), findsOneWidget);
+    pending.complete(OpenedDefault(api: late, created: true));
+    await tester.pumpAndSettle();
+    expect(late.calls, ['close'], reason: '遅れて返った保管庫は閉じる');
+    expect(find.text(defaultCreatedText), findsNothing);
+    expect(
+      harness.vault.calls,
+      isNot(contains('close')),
+      reason: '開いた保管庫はそのまま',
+    );
+  });
+
+  testWidgets('既定の保管庫の一覧を出しているあいだに「開く」の保管庫が返ってきたら、一覧を重ねずに閉じる', (tester) async {
+    final defaultPending = Completer<OpenedDefault>();
+    final openPending = Completer<VaultApi>();
+    final other = FakeVault();
+    final harness = OpenHarness()
+      ..openDefaultOnStart = true
+      ..openResult = (() => openPending.future)
+      ..defaultResult = ((vault) => defaultPending.future);
+    await harness.pump(tester);
+    await tester.pump();
+    await tester.enterText(find.byKey(const Key('root')), r'D:\Vaults\Other');
+    await tapKey(tester, 'open');
+    await tester.pump();
+    defaultPending.complete(OpenedDefault(api: harness.vault, created: false));
+    await tester.pumpAndSettle();
+    expect(find.text('保管庫：MyVault'), findsOneWidget);
+    openPending.complete(other);
+    await tester.pumpAndSettle();
+    expect(other.calls, ['close'], reason: 'あとから返った保管庫は閉じる');
+    // 一覧は1つだけ：閉じると開く画面へ戻る
+    await tapKey(tester, 'close');
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('default_card')), findsOneWidget);
+    expect(harness.vault.calls.where((c) => c == 'close'), hasLength(1));
+  });
+}
+
+class _PendingPicker implements FolderPicker {
+  _PendingPicker(this.pending);
+
+  final Completer<String?> pending;
+  int calls = 0;
+
+  @override
+  Future<String?> pickFolder() {
+    calls++;
+    return pending.future;
+  }
+}
+
+void main() {
+  openPageTests();
+  defaultVaultTests();
 
   testWidgets('フォルダへ移動し、上へ戻る。ファイルは中身を表示する', (tester) async {
     final vault = await pumpBrowser(tester);

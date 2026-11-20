@@ -21,8 +21,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use os_sys::{
     Access, Dir, EntryKind, InvalidName, KnownFolder, Links, Name, Opened, OpenedPass, Parent,
     PassDir, Share, Want, create_dir_child, create_file_child, delete_by_handle, file_id,
-    final_path, free_space, known_folder, open_child, open_pass_dir, open_path, os_random,
-    read_dir_by_handle, rename_no_replace, rename_replace,
+    final_path, free_space, known_folder, link_count, open_child, open_pass_dir, open_path,
+    os_random, read_dir_by_handle, rename_no_replace, rename_replace,
 };
 
 // 開き方の定数（vault-core の guard の定数と同じ値）
@@ -1406,7 +1406,185 @@ fn r14e_junction_id_record() {
 }
 
 // ---------------------------------------------------------------------------
-// K：既知のフォルダ（W5。 のK0〜K3）
+// R21・R22 リンクの数（R21 は必ず通る、R22 は記録）
+// ---------------------------------------------------------------------------
+
+/// R21：リンクの数（link_count）。新しいファイルは 1。std の hard_link のあとは、両方の名前から 2。属性だけ
+/// （LEAF_ATTRS）・DELETE と属性（TARGET_FILE）・std の File::open のどのハンドルでも読める。リンクを足す前から
+/// 開いたままのハンドルでも 2。外の名前を消すと 1。フォルダとジャンクションそのものの値は記録する。
+#[test]
+fn r21_link_count() {
+    let t = TestDir::new("r21");
+    let outside = TestDir::new("r21-outside");
+    fs::create_dir(t.join("in")).unwrap();
+    fs::write(t.join("in").join("x.txt"), b"x").unwrap();
+    let top = root(t.path());
+    let inside = child_dir(&top, "in", HOLD_DIR);
+    let inner = t.join("in").join("x.txt");
+    let outer = outside.join("x.txt");
+
+    // 3通りのハンドルで読む（属性だけ・DELETE と属性・std の File::open）
+    let each = |label: &str, expected: u32| {
+        let attrs = link_count(&child_file(&inside, "x.txt", LEAF_ATTRS)).unwrap();
+        let target = link_count(&child_file(&inside, "x.txt", TARGET_FILE)).unwrap();
+        let std_open = link_count(&File::open(&inner).unwrap()).unwrap();
+        println!("R21 {label}：LEAF_ATTRS={attrs}・TARGET_FILE={target}・File::open={std_open}");
+        assert_eq!(
+            (attrs, target, std_open),
+            (expected, expected, expected),
+            "{label}"
+        );
+    };
+
+    // 新しいファイルは 1。リンクを足す前から開いておくハンドル（属性だけ）
+    let held = child_file(&inside, "x.txt", LEAF_ATTRS);
+    assert_eq!(link_count(&held).unwrap(), 1);
+    each("新しいファイル", 1);
+
+    // 外にハードリンクを作ると、中の名前・外の名前・開いたままのハンドルのどれからも 2
+    fs::hard_link(&inner, &outer).unwrap();
+    each("ハードリンクのあと（中の名前）", 2);
+    assert_eq!(link_count(&File::open(&outer).unwrap()).unwrap(), 2);
+    assert_eq!(link_count(&held).unwrap(), 2, "開いたままのハンドル");
+
+    // 外の名前を消すと 1（開いたままのハンドルからも）
+    fs::remove_file(&outer).unwrap();
+    each("外の名前を消したあと", 1);
+    assert_eq!(link_count(&held).unwrap(), 1, "開いたままのハンドル");
+    drop(held);
+
+    // 記録：フォルダ（HOLD_DIR）と、ジャンクションそのもの（LEAF_ATTRS。たどらない）
+    let dir_links = link_count(inside.as_file());
+    println!(
+        "R21（記録）：フォルダのリンクの数＝{}（{}）",
+        dir_links
+            .as_ref()
+            .map_or_else(|_| "-".to_string(), u32::to_string),
+        code(&dir_links)
+    );
+    if junction(&t.join("j"), outside.path()) {
+        let link = match open_child(&top, &name("j"), Want::Any, LEAF_ATTRS, SHARE_RW).unwrap() {
+            Opened::Link(l) => l,
+            _ => panic!("ジャンクションがリンクとして開かない"),
+        };
+        let link_links = link_count(&link);
+        println!(
+            "R21（記録）：ジャンクションそのもののリンクの数＝{}（{}）",
+            link_links
+                .as_ref()
+                .map_or_else(|_| "-".to_string(), u32::to_string),
+            code(&link_links)
+        );
+    }
+}
+
+/// 時刻を UNIX 時刻のナノ秒にする（R8 と同じ形。1970 年より前は負）。
+fn unix_ns(t: SystemTime) -> i64 {
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_nanos()).unwrap(),
+        Err(e) => -i64::try_from(e.duration().as_nanos()).unwrap(),
+    }
+}
+
+/// R22 の1回：`top` の下のフォルダ `dir` を HOLD_DIR で開き直して列挙し、`x.txt` の（大きさ, 更新時刻）を返す
+/// （走査と同じく、フォルダの一覧が持つ値）。
+fn listed_x(top: &Dir, dir: &str) -> (u64, i64) {
+    let mut d = child_dir(top, dir, HOLD_DIR);
+    let entries = read_dir_by_handle(&mut d).unwrap();
+    let e = entries
+        .iter()
+        .find(|e| e.name() == OsStr::new("x.txt"))
+        .expect("一覧に x.txt がない");
+    (e.end_of_file(), e.modified_unix_ns())
+}
+
+/// R22（記録）：中の in\x.txt と外の out\x.txt をハードリンクにし、外の名前から書き換えて閉じたとき、
+/// 中のフォルダの一覧（走査が索引と比べる値）の大きさ・更新時刻は古いままか。
+/// - A0：リンクを作る前の一覧。A：リンクを作った直後の一覧（リンクを作っただけで一覧が変わるか）。
+/// - B：外の名前から書き換えて閉じた直後の一覧。D：その 1 秒あと（中の名前を開かずに）。
+/// - H：中の名前を属性だけ（LEAF_ATTRS）で開いて読んだ値（ハンドルの値）。C：中の名前を開いて閉じたあとの一覧。
+/// - O：外のフォルダの一覧（書き換えた名前の側）。
+#[test]
+fn r22_listing_after_write_through_other_name_record() {
+    let t = TestDir::new("r22");
+    let outside = TestDir::new("r22-outside");
+    fs::create_dir(t.join("in")).unwrap();
+    fs::create_dir(outside.join("out")).unwrap();
+    let inner = t.join("in").join("x.txt");
+    let outer = outside.join("out").join("x.txt");
+    fs::write(&inner, b"old").unwrap();
+    // 書き換えの前の更新時刻を古くしておく（時刻の細かさに左右されずに、変わったかが分かるように）
+    let old_time = UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+    OpenOptions::new()
+        .write(true)
+        .open(&inner)
+        .unwrap()
+        .set_modified(old_time)
+        .unwrap();
+    let top = root(t.path());
+
+    let a0 = listed_x(&top, "in");
+    fs::hard_link(&inner, &outer).unwrap();
+    let a = listed_x(&top, "in");
+
+    let new_bytes = b"new content, longer than before";
+    {
+        let mut f = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&outer)
+            .unwrap();
+        f.write_all(new_bytes).unwrap();
+        f.sync_all().unwrap();
+    }
+    let b = listed_x(&top, "in");
+    let o = listed_x(&root(outside.path()), "out");
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let d = listed_x(&top, "in");
+
+    let h = {
+        let inside = child_dir(&top, "in", HOLD_DIR);
+        let f = child_file(&inside, "x.txt", LEAF_ATTRS);
+        let meta = f.metadata().unwrap();
+        (meta.len(), unix_ns(meta.modified().unwrap()))
+    };
+    let c = listed_x(&top, "in");
+
+    let old = (3, unix_ns(old_time));
+    let new_len = new_bytes.len() as u64;
+    let which = |v: (u64, i64)| {
+        if v == old {
+            "古いまま"
+        } else if v == h {
+            "新しい（ハンドルの値と同じ）"
+        } else if v.0 == new_len {
+            "大きさだけ新しい"
+        } else {
+            "どちらでもない"
+        }
+    };
+    println!(
+        "R22：A0（リンクの前）={a0:?}、A（リンクの直後）={a:?} → リンクを作っただけで一覧が変わる={}",
+        a0 != a
+    );
+    println!("R22：H（中の名前のハンドルの値）={h:?}");
+    println!(
+        "R22：B（外から書き換えた直後の中の一覧）={b:?} → {}",
+        which(b)
+    );
+    println!(
+        "R22：D（その 1 秒あと、中の名前を開かずに）={d:?} → {}",
+        which(d)
+    );
+    println!("R22：C（中の名前を開いて閉じたあと）={c:?} → {}", which(c));
+    println!("R22：O（外のフォルダの一覧）={o:?} → {}", which(o));
+    // ハンドルの値は新しい（走査の読み直しが頼る所。ここだけは必ず）
+    assert_eq!(h.0, new_len);
+    assert_ne!(h.1, old.1);
+}
+
+// ---------------------------------------------------------------------------
+// K：既知のフォルダ（K0〜K3）
 //
 // 子プロセスのテストは、親の環境変数を変えない（Command の env・env_remove・env_clear で、子にだけ渡す）。
 // 子の側（k_child_known_folders）は、OS_SYS_TEST_CHILD がないときは何もせずに通る。結果は、パスを出さずに
@@ -1533,7 +1711,7 @@ fn k_child_known_folders() {
 
 /// 環境変数で変わることが分かっている場所（記録だけ）：ProgramData は、自分のトークンを渡しても、場所の値の中の
 /// `%SystemDrive%` をプロセスの環境変数で広げる（SystemDrive を替えると違う場所、消すと絶対パスでなくなり Err）。
-/// 守り方は、あとで決める。
+/// 守り方は、vault-core の根の判定で決めている。
 const K_RECORD_ONLY: KnownFolder = KnownFolder::ProgramData;
 
 /// 子プロセスの結果。
@@ -1589,7 +1767,7 @@ fn k_expect_same(label: &str, run: ChildRun) {
     }
 }
 
-/// K1（必ず・止める決まり S1）：子プロセスで、ユーザーの変数を偽のフォルダ（と偽の名前）に替えても、8つの場所は
+/// K1（必ず通る）：子プロセスで、ユーザーの変数を偽のフォルダ（と偽の名前）に替えても、8つの場所は
 /// 親と同じ（ProgramData は記録。K_RECORD_ONLY）。
 #[test]
 fn k1_user_variables_replaced() {
@@ -1614,21 +1792,21 @@ fn k1_user_variables_replaced() {
     k_expect_same("K1 ユーザーの変数を替える", run);
 }
 
-/// K1b（記録）：SystemDrive だけを替える・消す。ProgramData が変わる（記録の行に出る）のが、SystemDrive による
+/// （記録）SystemDrive だけを替える・消す。ProgramData が変わる（記録の行に出る）のが、SystemDrive による
 /// ことを確かめる。ほかの7つは親と同じ（必ず）。
 #[test]
 fn k1b_only_system_drive_changed() {
     let run = k_run_child(|cmd| {
         cmd.env("SystemDrive", "Q:");
     });
-    k_expect_same("K1b SystemDrive だけを替える", run);
+    k_expect_same("SystemDrive だけを替える", run);
     let run = k_run_child(|cmd| {
         cmd.env_remove("SystemDrive");
     });
-    k_expect_same("K1b SystemDrive だけを消す", run);
+    k_expect_same("SystemDrive だけを消す", run);
 }
 
-/// K2（必ず・止める決まり S1）：子プロセスで、ユーザーの変数を消しても、8つの場所は親と同じ（ProgramData は記録）。
+/// K2（必ず通る）：子プロセスで、ユーザーの変数を消しても、8つの場所は親と同じ（ProgramData は記録）。
 #[test]
 fn k2_user_variables_removed() {
     let run = k_run_child(|cmd| {
@@ -1678,7 +1856,7 @@ fn k3_system_variables_replaced_removed_and_cleared() {
 }
 
 // ---------------------------------------------------------------------------
-// R20（ACL の2つめの門の開き方。止める決まり S2）
+// R20（ACL の2つめの門の開き方）
 // ---------------------------------------------------------------------------
 
 /// 利用者のファイルを上書き・移動・削除・置き換えるときの2つめの門の開き方（vault-core の guard の TARGET_FILE_W と
@@ -1732,7 +1910,7 @@ fn file_state(path: &Path) -> FileState {
     }
 }
 
-/// R20（必ず。止める決まり S2）：利用者のファイルを DELETE・WRITE_DATA・READ_ATTRIBUTES（共有 READ・WRITE）で開いて
+/// R20（必ず通る）：利用者のファイルを DELETE・WRITE_DATA・READ_ATTRIBUTES（共有 READ・WRITE）で開いて
 /// 閉じても、中身・大きさ・更新時刻・作成時刻・属性（アーカイブの印）・変更時刻（ChangeTime）・LastUsn が変わらない
 /// fsutil を使えないときは失敗にする（確かめずに通らないように）。fsutil のない
 /// 環境では、環境変数 `OS_SYS_R20_NO_FSUTIL=1` を付けたときだけ、変更時刻と LastUsn を確かめずに進め、そのことを

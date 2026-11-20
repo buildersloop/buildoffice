@@ -5,9 +5,14 @@ mod common;
 
 use std::ptr;
 
-use common::{TestDir, open_raw, take};
+use common::{
+    TestDir, create_raw, open_default_raw, open_raw, real_default_state,
+    skip_when_real_default_exists, take,
+};
 use serde_json::json;
-use vault_ffi::{MAX_ALLOC_BYTES, live_buffers, vf_alloc, vf_close, vf_free, vf_open};
+use vault_ffi::{
+    MAX_ALLOC_BYTES, live_buffers, vf_alloc, vf_close, vf_create, vf_free, vf_open, vf_open_default,
+};
 
 #[test]
 fn buffers_are_allocated_freed_once_and_never_double_freed() {
@@ -66,5 +71,63 @@ fn buffers_are_allocated_freed_once_and_never_double_freed() {
     assert_eq!(reply["error"]["code"], "INVALID_ARGUMENT");
     assert_eq!(live_buffers(), base, "返り値のバッファの解放の漏れがない");
 
+    // vf_create も同じ：要求を vf_alloc のバッファで渡し、成功・失敗の返り値を1回ずつ解放する
+    let request = json!({"parent": dir.path().to_str().unwrap(), "name": "made"}).to_string();
+    let buffer = vf_alloc(request.len());
+    assert!(!buffer.is_null());
+    // SAFETY: buffer は request.len() バイトの、vault-ffi が確保した書けるバッファ。request と重ならない。
+    unsafe { ptr::copy_nonoverlapping(request.as_ptr(), buffer, request.len()) };
+    let mut out_len = 0usize;
+    // SAFETY: buffer の先頭 request.len() バイトは書いたばかりで読める。out_len は書ける usize。
+    let out = unsafe { vf_create(buffer, request.len(), &mut out_len) };
+    assert_eq!(live_buffers(), base + 2, "要求のバッファと返り値のバッファ");
+    // SAFETY: out と out_len は、いま vf_create が返したもの（take が1回だけ解放する）。
+    let reply = unsafe { take(out, out_len) };
+    let made = reply["ok"]["handle"].as_u64().expect("作れた");
+    // SAFETY: buffer は vf_alloc(request.len()) が返したもので、まだ解放していない。
+    unsafe { vf_free(buffer, request.len()) };
+    assert_eq!(live_buffers(), base);
+    for request in [
+        json!({"parent": dir.path().to_str().unwrap(), "name": "made"}).to_string(),
+        json!({"parent": dir.path().to_str().unwrap(), "name": "CON"}).to_string(),
+        "{".to_owned(),
+    ] {
+        let reply = create_raw(request.as_bytes());
+        assert!(reply["error"]["code"].is_string(), "{reply}");
+    }
+    assert_eq!(live_buffers(), base, "vf_create の返り値の解放の漏れがない");
+
+    // vf_open_default も同じ（形の誤りの要求だけを渡す。形が正しい要求は本物のホームに作るので、ここでは渡さない）。
+    // DefaultRequest の決まりを変えるときはこのテストを見直す（形の誤りの要求が通るようになると本物のホームに保管庫を
+    // 作るため）。本物の既定の保管庫がすでにあるときは、「SKIP：…」を出して、この部分だけを飛ばす
+    if !skip_when_real_default_exists() {
+        let before = real_default_state();
+        let request = br#"{"x":1}"#;
+        let buffer = vf_alloc(request.len());
+        assert!(!buffer.is_null());
+        // SAFETY: buffer は request.len() バイトの、vault-ffi が確保した書けるバッファ。request と重ならない。
+        unsafe { ptr::copy_nonoverlapping(request.as_ptr(), buffer, request.len()) };
+        let mut out_len = 0usize;
+        // SAFETY: buffer の先頭 request.len() バイトは書いたばかりで読める。out_len は書ける usize。
+        let out = unsafe { vf_open_default(buffer, request.len(), &mut out_len) };
+        assert_eq!(live_buffers(), base + 2, "要求のバッファと返り値のバッファ");
+        // SAFETY: out と out_len は、いま vf_open_default が返したもの（take が1回だけ解放する）。
+        let reply = unsafe { take(out, out_len) };
+        assert_eq!(reply["error"]["code"], "INVALID_ARGUMENT");
+        // SAFETY: buffer は vf_alloc(request.len()) が返したもので、まだ解放していない。
+        unsafe { vf_free(buffer, request.len()) };
+        for request in [b"[]".as_slice(), b"", b"{"] {
+            let reply = open_default_raw(request);
+            assert_eq!(reply["error"]["code"], "INVALID_ARGUMENT", "{reply}");
+        }
+        assert_eq!(
+            live_buffers(),
+            base,
+            "vf_open_default の返り値の解放の漏れがない"
+        );
+        assert_eq!(real_default_state(), before, "本物のホームに触れない");
+    }
+
     vf_close(handle);
+    vf_close(made);
 }

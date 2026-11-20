@@ -1,10 +1,10 @@
-//! 既知のフォルダ（W5。SHGetKnownFolderPath・CoTaskMemFree）。
+//! 既知のフォルダ（SHGetKnownFolderPath・CoTaskMemFree）。
 //!
 //! 守る場所（ホーム・AppData など）を、環境変数だけでなく OS の値でも決めるために使う（環境変数は、プロセスを
 //! 起動する側がすべて差し替えられる）。flags は KF_FLAG_DONT_VERIFY（設計の決定：ネットワークの場所で待たない、
 //! まだないフォルダの場所も返す）。
 //!
-//! hToken は、自分のプロセスのトークン（B1。OpenProcessToken）。NULL を渡すと、場所の値の中の `%USERPROFILE%`・
+//! hToken は、自分のプロセスのトークン（OpenProcessToken）。NULL を渡すと、場所の値の中の `%USERPROFILE%`・
 //! `%SystemDrive%` などをプロセスの環境変数で広げるので、子プロセスで環境変数を替えると AppData（Roaming・Local）
 //! と ProgramData が変わり、SystemDrive を消すと ProgramData が絶対パスでなくなった（K1・K2・K3 の env_clear。
 //! 2026-11-17）。自分のトークンを渡すと、トークンのユーザーの値で広げる。
@@ -70,9 +70,9 @@ impl KnownFolder {
 /// （OS が返した文字列を、上限なく読み進めない）。
 const MAX_UNITS: usize = 32_768;
 
-/// 既知のフォルダの場所を OS に問い合わせる（W5）。
+/// 既知のフォルダの場所を OS に問い合わせる。
 ///
-/// - flags は KF_FLAG_DONT_VERIFY、hToken は自分のプロセスのトークン（B1。開けなければ Err）。フォルダは
+/// - flags は KF_FLAG_DONT_VERIFY、hToken は自分のプロセスのトークン（開けなければ Err）。フォルダは
 ///   作らない（KF_FLAG_CREATE を付けない）。
 /// - 成功は、HRESULT が 0 以上で、返った文字列が絶対パスのときだけ。HRESULT が FACILITY_WIN32 の失敗
 ///   （0x8007xxxx）なら Win32 の番号のエラー、ほかの失敗は値を文に入れたエラー。
@@ -107,7 +107,7 @@ pub fn known_folder(folder: KnownFolder) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-/// 自分のプロセスのトークンを、TOKEN_QUERY・TOKEN_IMPERSONATE で開く（B1）。閉じるのは OwnedHandle。
+/// 自分のプロセスのトークンを、TOKEN_QUERY・TOKEN_IMPERSONATE で開く。閉じるのは OwnedHandle。
 fn own_token() -> io::Result<OwnedHandle> {
     // SAFETY: 引数を受け取らず、今のプロセスの仮のハンドル（-1）を返すだけ。仮のハンドルは閉じなくてよく、
     // 閉じない（OwnedHandle に入れない）。hToken にはこれを渡さない（-1 は Default User の意味）。

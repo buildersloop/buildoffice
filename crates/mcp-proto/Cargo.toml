@@ -1,6 +1,6 @@
 [package]
 name = "mcp-proto"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -8,8 +8,10 @@ publish.workspace = true
 
 # 外部の依存は serde・serde_json だけ。保管庫（vault-core）には依存しない。
 # json-guard は、依存のないワークスペースの中のクレート（読む前の JSON の要素の数を数える）。
+# safe-log は、依存のないワークスペースの中のクレート（ログの1行を書いてよい型だけで組み立てる）。
 # serde_json の入れ子の深さの上限（既定 128）を外さない（unbounded_depth を使わない）。
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 json-guard = { path = "../json-guard" }
+safe-log = { path = "../safe-log" }

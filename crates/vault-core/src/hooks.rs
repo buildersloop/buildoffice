@@ -47,10 +47,14 @@ pub enum Step {
     BeforeScanLock,
     /// 走査で、書くためにロックを取ったあと、歩いた結果を合わせる前（ロックを持っている）。
     BeforeReconcile,
+    /// 走査を終えた直後（ロックを外したあと。履歴を読んで返す前）。
+    AfterScan,
     /// init が失敗して、片づけを始める直前（init の中で開いたロック・履歴のハンドルは閉じたあと）。
     BeforeInitUndo,
     /// init の片づけで、作ったフォルダを消すために開き直す直前（そのフォルダのハンドルは閉じたあと）。
     BeforeInitRemove(Removing),
+    /// 既定の保管庫：場所を調べた（リンクでもファイルでもないと分かった）あと、作る・開く前（確かめのあとに場所を差し替える瞬間を作るため）。
+    AfterDefaultVaultCheck,
 }
 
 /// init の片づけで消すフォルダの種類。
@@ -124,6 +128,15 @@ pub enum FakeFreeSpace {
     Fail,
 }
 
+/// 偽のリンクの数（履歴のファイルのリンクの数を読む所）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FakeLinks {
+    /// この数を返す。
+    Count(u32),
+    /// 読めない。
+    Fail,
+}
+
 type Hook = Box<dyn FnOnce()>;
 type PathHook = Box<dyn FnOnce(PathBuf) -> PathBuf>;
 
@@ -131,6 +144,7 @@ thread_local! {
     static HOOKS: RefCell<Vec<(Step, Hook)>> = const { RefCell::new(Vec::new()) };
     static FINAL_PATHS: RefCell<Vec<(FinalAt, PathHook)>> = const { RefCell::new(Vec::new()) };
     static FREE_SPACE: RefCell<Option<FakeFreeSpace>> = const { RefCell::new(None) };
+    static JOURNAL_LINKS: RefCell<Vec<FakeLinks>> = const { RefCell::new(Vec::new()) };
 }
 
 /// このスレッドで次に `step` に来たとき、1回だけ `hook` を呼ぶ。複数を登録できる（登録した順に使う）。
@@ -156,6 +170,12 @@ pub fn fake_final_path(at: FinalAt, f: impl FnOnce(PathBuf) -> PathBuf + 'static
 /// このスレッドで次に問い合わせる空き容量を、偽の値か失敗にする（1回だけ）。
 pub fn fake_free_space(value: FakeFreeSpace) {
     FREE_SPACE.with(|slot| *slot.borrow_mut() = Some(value));
+}
+
+/// このスレッドで次に履歴のファイルのリンクの数を読む所（開いたときと、書く直前）を、偽の値か失敗にする。
+/// 複数を登録できる（読むたびに、登録した順に1つずつ使う）。
+pub fn fake_journal_links(value: FakeLinks) {
+    JOURNAL_LINKS.with(|slot| slot.borrow_mut().push(value));
 }
 
 thread_local! {
@@ -276,4 +296,13 @@ pub(crate) fn final_path(at: FinalAt, real: PathBuf) -> PathBuf {
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn take_free_space() -> Option<FakeFreeSpace> {
     FREE_SPACE.with(|slot| slot.borrow_mut().take())
+}
+
+/// 履歴のファイルのリンクの数を読む所：偽の値が登録されていれば、いちばん先に登録したものを取り出す。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn take_journal_links() -> Option<FakeLinks> {
+    JOURNAL_LINKS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        (!slot.is_empty()).then(|| slot.remove(0))
+    })
 }

@@ -2,7 +2,7 @@
 //!
 //! - 片づけで消すのは、この init が作ったもので、場所と ID が記録と一致するものだけ（guard の InitScope）。
 //!   ほかの処理が差し替えたもの・中に置いたものは消さず、もとのエラーに「片づけで残したもの」の注を足す。
-//! - S1〜S8 は、安全の確認で試した差し替え。
+//! - s1_…〜s8_… のテストは、片づけの最中に、外のもの・ほかの処理のものを差し替えられた場合を試す。
 //! - init を、索引・履歴・lock を作ったあとで失敗させるには、2回目の `.vault/tmp` を開く所（vault.json の一時
 //!   ファイル）で `.vault/tmp` に (WD)（ファイルを作れない）を付ける。
 
@@ -524,7 +524,7 @@ fn f11_a_reopened_folder_found_outside_is_a_conflict() {
 }
 
 // ---------------------------------------------------------------------------
-// 安全の確認で試した差し替えのテスト（S1〜S8）。差し替えの時点と種類を変えても、外のもの・ほかの
+// 差し替えのテスト（s1_…〜s8_…）。差し替えの時点と種類を変えても、外のもの・ほかの
 // 処理のものは消えず、注に出る。どの差し替えも、本当に起きたことを確かめる（起きなければテストが落ちる）。
 // ---------------------------------------------------------------------------
 
@@ -553,7 +553,7 @@ fn move_aside(dir: &Path, name: &str, keep_as: &str) {
         .unwrap_or_else(|e| panic!("{name} の名前を変えられない：{e}"));
 }
 
-/// S1：片づけの最初（BeforeInitUndo）に、.vault/tmp を外の空のフォルダへのジャンクションに、.vault/trash をほかの
+/// 片づけの最初（BeforeInitUndo）に、.vault/tmp を外の空のフォルダへのジャンクションに、.vault/trash をほかの
 /// 空のフォルダに差し替える → 外のフォルダもほかのフォルダも消えない。もとの IO_ERROR に、tmp・trash・.vault が出る。
 #[test]
 fn s1_swapped_tmp_and_trash_are_kept() {
@@ -587,7 +587,7 @@ fn s1_swapped_tmp_and_trash_are_kept() {
     assert!(vault.join("trash").is_dir(), "ほかの trash が消えた");
 }
 
-/// S2：片づけの最初に、.vault/journal を、同じ名前の履歴のファイルを持つ外のフォルダへのジャンクションに差し替える
+/// 片づけの最初に、.vault/journal を、同じ名前の履歴のファイルを持つ外のフォルダへのジャンクションに差し替える
 /// → 外の履歴のファイルは消えない。注に、履歴のファイル・journal・.vault が出る。
 #[test]
 fn s2_a_journal_swapped_to_outside_is_kept() {
@@ -627,7 +627,7 @@ fn s2_a_journal_swapped_to_outside_is_kept() {
     );
 }
 
-/// S3：片づけの最初に、.vault/index.json を外のファイルのハードリンクに、.vault/lock を外のフォルダへのジャンクションに
+/// 片づけの最初に、.vault/index.json を外のファイルのハードリンクに、.vault/lock を外のフォルダへのジャンクションに
 /// 差し替える → 外のファイルとフォルダは消えない。ハードリンクも消さない。注に index.json・lock・.vault が出る。
 #[test]
 fn s3_a_hard_linked_index_and_a_lock_junction_are_kept() {
@@ -661,7 +661,7 @@ fn s3_a_hard_linked_index_and_a_lock_junction_are_kept() {
     assert_eq!(names(&outside_dir), Some(vec![]), "外のフォルダが変わった");
 }
 
-/// S4：.vault を消す直前（BeforeInitRemove(VaultDir)）に、.vault をファイルに差し替える → ファイルは消えない。
+/// .vault を消す直前（BeforeInitRemove(VaultDir)）に、.vault をファイルに差し替える → ファイルは消えない。
 /// 注に .vault が出る。
 #[test]
 fn s4_a_dot_vault_swapped_to_a_file_is_kept() {
@@ -684,7 +684,7 @@ fn s4_a_dot_vault_swapped_to_a_file_is_kept() {
     assert_eq!(names(&p.join(".vault-ours")), Some(vec![]));
 }
 
-/// S5 の本体：p/new/v で、片づけの最初の CreatedDir（v を消す直前）に、v を差し替える（0＝外の空のフォルダへの
+/// s5_0〜s5_2 の本体：p/new/v で、片づけの最初の CreatedDir（v を消す直前）に、v を差し替える（0＝外の空のフォルダへの
 /// ジャンクション、1＝別の空のフォルダ、2＝ファイル）→ 差し替えたものも外のフォルダも消えない。注に new/v・new。
 fn s5_case(kind: u8) {
     let dir = TestDir::new(&format!("s5-{kind}"));
@@ -734,7 +734,7 @@ fn s5_2_a_created_folder_swapped_to_a_file_is_kept() {
     s5_case(2)
 }
 
-/// S6 の本体：p/new/v で、片づけの2つめの CreatedDir（new を消す直前）に、new を差し替える（0＝別の空のフォルダ、
+/// s6_0・s6_1 の本体：p/new/v で、片づけの2つめの CreatedDir（new を消す直前）に、new を差し替える（0＝別の空のフォルダ、
 /// 1＝ファイル）→ 差し替えたものは消えない。注に new。
 fn s6_case(kind: u8) {
     let dir = TestDir::new(&format!("s6-{kind}"));
@@ -778,7 +778,7 @@ fn s6_1_a_created_parent_swapped_to_a_file_is_kept() {
     s6_case(1)
 }
 
-/// S7：base（いちばん深いある祖先）がジャンクション（plink → real）で、片づけの最初に、その向き先を外（中に new/v が
+/// base（いちばん深いある祖先）がジャンクション（plink → real）で、片づけの最初に、その向き先を外（中に new/v が
 /// ある）へ変える → 片づけは、持っている base（real）を基準に進むので、real の中は空に戻り、外の new/v は消えない。
 /// 注はない。
 #[test]
@@ -811,7 +811,7 @@ fn s7_a_repointed_base_junction_does_not_redirect_the_undo() {
     assert_eq!(names(&outside.join("new").join("v")), Some(vec![]));
 }
 
-/// S8：片づけの最初に、base（p）の祖先（a）の名前を変えようとする → 持っているハンドルのため、名前の変更は拒否（5）で
+/// 片づけの最初に、base（p）の祖先（a）の名前を変えようとする → 持っているハンドルのため、名前の変更は拒否（5）で
 /// 止まり、片づけは最後まで進む（p の中は空に戻り、注はない）。
 #[test]
 fn s8_an_ancestor_of_the_base_cannot_be_renamed_during_undo() {

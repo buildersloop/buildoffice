@@ -183,7 +183,7 @@ pub fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "vault_changes",
-            description: "変更の履歴を返す（seq が since_seq より大きいものを、古い順に limit 件まで）。rescan:true（既定）なら、先に保管庫を調べて、ほかのアプリでの作成・更新・削除・名前の変更も履歴に入れる（actor は external/fs）。前の走査からの間隔（2秒と、前の走査にかかった時間の10倍（10分まで）の長いほう）が過ぎていなければ、調べずに履歴だけを返す（scanned:false。そのときの変更は次の走査で出る）。scan_incomplete が true なら、履歴の行が欠けていた、または索引がなくて合わせ直せなかったので、調べた結果を記録せずに終えた（incomplete_scans は、続けてそうなった回数。増え続けるなら、管理用のフォルダの履歴や索引をほかのアプリが書き換えている・消している）。完全な変更の検知ではない：大きさも更新時刻も変えずに中身だけを変えたもの、ハードリンクの別の名前から書き換えたものは見つからないことがある。続きは next_seq を since_seq に渡して読む。truncated が true なら、まだある。skipped_over_limit・skipped_invalid_names は、上限（64段・260字）を超える・ツールで扱えない名前なので調べなかった項目の数。読み取り専用でも、rescan は管理用のフォルダ（.vault）の索引と履歴を書き換える。",
+            description: "変更の履歴を返す（seq が since_seq より大きいものを、古い順に limit 件まで）。rescan:true（既定）なら、先に保管庫を調べて、ほかのアプリでの作成・更新・削除・名前の変更も履歴に入れる（actor は external/fs）。前の走査からの間隔（2秒と、前の走査にかかった時間の10倍（10分まで）の長いほう）が過ぎていなければ、調べずに履歴だけを返す（scanned:false。そのときの変更は次の走査で出る）。scan_incomplete が true なら、履歴の行が欠けていた、または索引がなくて合わせ直せなかったので、調べた結果を記録せずに終えた（incomplete_scans は、続けてそうなった回数。増え続けるなら、管理用のフォルダの履歴や索引をほかのアプリが書き換えている・消している）。完全な変更の検知ではない：大きさも更新時刻も変えずに中身だけを変えたものは見つからない。ハードリンクの別の名前から書き換えたものは、見つかるまでに何回かの走査がかかることがある。続きは next_seq を since_seq に渡して読む。truncated が true なら、まだある。skipped_over_limit・skipped_invalid_names は、上限（64段・260字）を超える・ツールで扱えない名前なので調べなかった項目の数。読み取り専用でも、rescan は管理用のフォルダ（.vault）の索引と履歴を書き換える。",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -434,6 +434,32 @@ mod tests {
         let names: Vec<String> = tool_specs().iter().map(|s| s.name.to_owned()).collect();
         assert_eq!(names, file);
         assert_eq!(names.len(), 10);
+    }
+
+    /// 保管庫を作るのは人だけの手続き（アプリの画面と `vault-mcp init`）。ツールには作る・初期化するものを出さない
+    /// （AI が保管庫を作れないようにする守り）。`tool_names.json` の名前も同じく確かめる。
+    #[test]
+    fn no_tool_creates_or_initializes_a_vault() {
+        let file: Vec<String> = serde_json::from_str(include_str!("../tool_names.json")).unwrap();
+        let specs: Vec<String> = tool_specs().iter().map(|s| s.name.to_owned()).collect();
+        for name in file.iter().chain(specs.iter()) {
+            let lower = name.to_ascii_lowercase();
+            // default：既定の保管庫を開く（なければ作る）のも人だけの手続き
+            for word in ["init", "create", "default"] {
+                assert!(!lower.contains(word), "{name} に {word} を含む");
+            }
+        }
+        // 受付口も、作る名前を知らない
+        for name in [
+            "vault_init",
+            "vault_create",
+            "init",
+            "create_vault",
+            "open_default_vault",
+            "vault_open_default",
+        ] {
+            assert_eq!(writes(name), None, "{name}");
+        }
     }
 
     #[test]

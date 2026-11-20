@@ -1,5 +1,10 @@
 # Project-level configuration.
 cmake_minimum_required(VERSION 3.14)
+# C/C++ のランタイムを静的に組み込む（/MT）ために、ランタイムの選び方を CMAKE_MSVC_RUNTIME_LIBRARY に任せる。
+# project() が既定のコンパイラーの設定（/MD）を作る前に決める必要があるので、project() より前に置く。
+if(POLICY CMP0091)
+  cmake_policy(SET CMP0091 NEW)
+endif()
 project(vault_app LANGUAGES CXX)
 
 # The name of the executable created for the application. Change this to change
@@ -44,6 +49,11 @@ function(APPLY_STANDARD_SETTINGS TARGET)
   target_compile_definitions(${TARGET} PRIVATE "_HAS_EXCEPTIONS=0")
   target_compile_definitions(${TARGET} PRIVATE "$<$<CONFIG:Debug>:_DEBUG>")
 endfunction()
+
+# C/C++ のランタイムを静的に組み込む（Debug は /MTd、ほかは /MT）。別に入れるランタイム（VCRUNTIME140.dll など）が
+# ない PC でも起動できるようにする。runner と Flutter の C++ の部品（flutter_wrapper_app）が同じ設定になるように、
+# add_subdirectory より前に置く。確かめ：scripts/check-runtime-deps.py（scripts/build-release.sh が流す）。
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # Flutter library and tool build rules.
 set(FLUTTER_MANAGED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/flutter")

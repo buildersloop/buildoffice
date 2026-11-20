@@ -6,6 +6,8 @@
 //!   `RootEnv` を引数で渡すことでだけ行う（根の判定を外す引数・環境変数は作らない）。
 //! - 入れ子の保管庫の判定（祖先だけ）と、入力のパスの要素の判定（`.`・`..`、Windows での末尾の `.`・空白、
 //!   予約名）は、別の関数にする。
+//! - `vault_path_in`：置き場所と保管庫の名前から、保管庫のパスを作る（アプリの画面から保管庫を作るとき）。
+//! - `check_parent_dir`：画面から作るときの置き場所が、すでにあるフォルダかを確かめる（なければ作らない）。
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -14,7 +16,7 @@ use std::path::{Component, Path, PathBuf, Prefix};
 
 use crate::error::{ErrorCode, Result, VaultError};
 use crate::guard;
-use crate::relpath::{RESERVED_NAME, is_windows_reserved_name};
+use crate::relpath::{MAX_COMPONENT_BYTES, RESERVED_NAME, RelPath, is_windows_reserved_name};
 
 /// 保管庫の印のファイル（`.vault/vault.json`）の名前。
 pub(crate) const VAULT_JSON: &str = "vault.json";
@@ -242,7 +244,7 @@ fn protected_places(
         if let Some(documents) = &os.documents {
             powershell(&mut list, documents);
         }
-        // ProgramData の OS の値は、プロセスの環境変数 SystemDrive で変わる（K1b）。
+        // ProgramData の OS の値は、プロセスの環境変数 SystemDrive で変わる（os-sys の実機の確かめで、SystemDrive だけを替える・消すと ProgramData が変わると分かった）。
         // Windows のフォルダ（環境変数で変わらない）のドライブの ProgramData も守る（設計の決定）
         if let Some(drive) = os.windows.as_deref().and_then(drive_root) {
             list.opened(&drive.join("ProgramData"));
@@ -497,6 +499,67 @@ pub(crate) fn check_input_path(path: &Path) -> Result<()> {
         return Err(invalid_root("絶対パスでない"));
     }
     Ok(())
+}
+
+/// 置き場所（親のフォルダ）と保管庫の名前から、保管庫のパスを作る。ファイルを読まない純粋な関数。
+///
+/// - `parent` は `init` と同じ入力のパスの決まり（`check_input_path`：`.`・`..`・UNC・デバイスの形・予約名がなく、
+///   絶対パスであること）。
+/// - `name` は1つの要素（`/`・`\` を含まない）で、保管庫の中の名前と同じ決まり（空でない・255 バイトまで・使えない
+///   文字がない・`.` と `..` でない・`.vault` でない・末尾が `.` か空白でない・`~` のあとに数字が続かない・予約名でない）。
+///
+/// どちらの誤りも `INVALID_ROOT`。名前の誤りの文は「保管庫の名前：…」で始まる。文には名前もパスも入れない。
+/// 根の判定（守る場所・入れ子・空でないフォルダ）は、このあとの `Vault::init` が行う。置き場所がすでにあるフォルダかは、
+/// この関数では見ない（ファイルを読まない）。画面から作るときは、続けて `check_parent_dir` を呼ぶ。
+pub fn vault_path_in(parent: &Path, name: &str) -> Result<PathBuf> {
+    check_input_path(parent)?;
+    check_vault_name(name)?;
+    Ok(parent.join(name))
+}
+
+/// 置き場所のフォルダが、すでにあるかを確かめる（アプリの画面から保管庫を作るとき。`vault_path_in` のあとに呼ぶ）。
+///
+/// フォルダがない・フォルダでない（ファイル）・途中がフォルダでないときは、どれも同じ `INVALID_ROOT`（置き場所のフォルダがない）。
+/// 何も作らない。まだない祖先を作ってよいのは `vault-mcp init`（`Vault::init` の決まり）だけで、画面の作成は、打ち間違いで
+/// 知らないフォルダが増えないよう、置き場所がすでにあるときだけ作る。リンク（ジャンクション）はたどる（先がフォルダならよい。
+/// 根の判定は、このあとの `Vault::init` が、リンクをたどった最終のパスに当てる）。調べられないとき（権限など）は `IO_ERROR`。
+/// 文には、パスを入れない。
+pub fn check_parent_dir(parent: &Path) -> Result<()> {
+    match fs::metadata(parent) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(missing_parent()),
+        Err(e) if is_not_found(&e) => Err(missing_parent()),
+        Err(e) => Err(VaultError::io("置き場所のフォルダを調べられない", &e)),
+    }
+}
+
+fn missing_parent() -> VaultError {
+    invalid_root("置き場所のフォルダがない（すでにあるフォルダを選ぶ）")
+}
+
+/// 保管庫の名前の決まり（`vault_path_in`）。
+fn check_vault_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(invalid_name("空の名前は使えない"));
+    }
+    if name.contains(['/', '\\']) {
+        return Err(invalid_name(
+            "/ と \\ は使えない（置き場所の中に作るフォルダの名前を1つだけ書く）",
+        ));
+    }
+    if name.len() > MAX_COMPONENT_BYTES {
+        return Err(invalid_name(&format!(
+            "長すぎる（{MAX_COMPONENT_BYTES} バイトまで）"
+        )));
+    }
+    // 1つの要素なので、保管庫の中のパスの決まりがそのまま名前の決まりになる（その文は名前を含まない）
+    RelPath::parse(name)
+        .map(|_| ())
+        .map_err(|e| invalid_name(e.message()))
+}
+
+fn invalid_name(reason: &str) -> VaultError {
+    invalid_root(&format!("保管庫の名前：{reason}"))
 }
 
 /// 入れ子の保管庫の判定：祖先に `.vault/vault.json` があれば `INVALID_ROOT`。子孫は調べない。
@@ -845,6 +908,160 @@ mod tests {
             assert_eq!(err.code(), ErrorCode::InvalidRoot);
         } else {
             assert!(check_input_path(&abs(&["a", "v"])).is_ok());
+        }
+    }
+
+    /// 置き場所（このプラットフォームの、ドライブ文字か / から始まる絶対パス）。ファイルには触れない。
+    fn plain_parent() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\Profiles\u\Vaults")
+        } else {
+            PathBuf::from("/Profiles/u/Vaults")
+        }
+    }
+
+    /// 保管庫の名前の表：通るもの。パスは、置き場所の下の1つの要素になる。
+    #[test]
+    fn vault_name_table_accepted() {
+        let parent = plain_parent();
+        let long = "a".repeat(MAX_COMPONENT_BYTES);
+        let japanese = "あ".repeat(85);
+        for name in [
+            "MyVault",
+            "日本語の保管庫",
+            "my vault",
+            "a.b",
+            ".x",
+            "a~b",
+            "~",
+            "COM10",
+            "CONSOLE",
+            ".vaultx",
+            long.as_str(),
+            japanese.as_str(),
+        ] {
+            let path = vault_path_in(&parent, name).unwrap_or_else(|e| panic!("{name:?}: {e}"));
+            assert_eq!(path, parent.join(name));
+            assert_eq!(path.parent(), Some(parent.as_path()), "{name:?}");
+        }
+        // 置き場所の末尾に区切りがあっても同じ
+        let trailing = PathBuf::from(format!("{}{}", parent.display(), std::path::MAIN_SEPARATOR));
+        assert_eq!(
+            vault_path_in(&trailing, "v").unwrap(),
+            parent.join("v"),
+            "末尾の区切り"
+        );
+    }
+
+    /// 保管庫の名前の表：断るもの。どれも INVALID_ROOT で、文は「保管庫の名前：」で始まり、名前も置き場所も入れない。
+    #[test]
+    fn vault_name_table_rejected() {
+        let parent = plain_parent();
+        let too_long = "a".repeat(MAX_COMPONENT_BYTES + 1);
+        let too_long_japanese = "あ".repeat(86);
+        let huge = "b".repeat(5000);
+        for name in [
+            "",
+            r"a\b",
+            "a/b",
+            "/a",
+            r"\a",
+            "a/",
+            ".",
+            "..",
+            "...",
+            "CON",
+            "con",
+            "nul.txt",
+            "COM1",
+            "lpt¹",
+            "CON .txt",
+            "x.",
+            "x ",
+            "a:b",
+            "C:",
+            "a*b",
+            "a?b",
+            "a<b",
+            "a|b",
+            "a\"b",
+            "a\u{0}b",
+            "a\u{1F}b",
+            "a\u{202E}b",
+            "a\u{200B}b",
+            "a\u{FEFF}b",
+            ".vault",
+            ".VAULT",
+            "file~1",
+            "VAULT~1",
+            too_long.as_str(),
+            too_long_japanese.as_str(),
+            huge.as_str(),
+        ] {
+            let err = vault_path_in(&parent, name).unwrap_err();
+            assert_eq!(err.code(), ErrorCode::InvalidRoot, "{name:?}");
+            assert!(
+                err.message().starts_with("保管庫の名前："),
+                "{name:?}: {}",
+                err.message()
+            );
+            assert!(!err.message().contains("Profiles"), "{name:?}");
+        }
+        // 文に名前を入れない（断る理由ごとに、使える文字の部分を見分けられる名前で）
+        for name in [
+            "secret-name.",
+            "secret-name ",
+            "secret-name/x",
+            r"secret-name\x",
+            "secret-name:x",
+            "secret\u{202E}name",
+            "secret-name~1",
+            "SECRET-NAME~1.txt",
+        ] {
+            let err = vault_path_in(&parent, name).unwrap_err();
+            let message = err.message().to_lowercase();
+            assert!(!message.contains("secret"), "{name:?}: {message}");
+        }
+    }
+
+    /// 置き場所の誤り（相対・UNC・デバイスの形・. と ..・予約名）は、名前より先に INVALID_ROOT。文にパスを入れない。
+    #[test]
+    fn vault_parent_is_checked_like_the_init_input() {
+        let mut bad = vec![
+            PathBuf::from(""),
+            PathBuf::from("relative"),
+            PathBuf::from("a").join("b"),
+            dotted(),
+        ];
+        if cfg!(windows) {
+            for parent in [
+                r"\\vault-core-test.invalid\share\x",
+                r"\\?\C:\Profiles\u\Vaults",
+                r"\\.\C:\x",
+                r"C:x",
+                r"\Profiles\u",
+                r"C:\Profiles\CON\x",
+                r"C:\Profiles\x.\y",
+            ] {
+                bad.push(PathBuf::from(parent));
+            }
+        }
+        for parent in &bad {
+            for name in ["v", ""] {
+                let err = vault_path_in(parent, name).unwrap_err();
+                assert_eq!(err.code(), ErrorCode::InvalidRoot, "{}", parent.display());
+                assert!(
+                    !err.message().starts_with("保管庫の名前："),
+                    "置き場所を先に確かめる：{}",
+                    parent.display()
+                );
+                assert!(!err.message().contains("Profiles"), "{}", parent.display());
+                assert!(
+                    !err.message().contains("vault-core-test"),
+                    "{}",
+                    parent.display()
+                );
+            }
         }
     }
 

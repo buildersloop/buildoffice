@@ -167,10 +167,33 @@ abstract interface class VaultApi {
   Future<void> close();
 }
 
-/// 保管庫を開く関数（`init` なら作ってから開く）。
+/// 保管庫を開く関数（`init` なら作ってから開く）。人だけの手続き（ツールにしない）。
 typedef VaultOpener =
     Future<VaultApi> Function({
       required String root,
       required bool init,
       required bool readOnly,
     });
+
+/// 置き場所（`parent`）の中に、名前（`name`）を付けて保管庫を作り、書ける状態で開く関数。人だけの手続き（ツールにしない）。
+typedef VaultCreator =
+    Future<VaultApi> Function({required String parent, required String name});
+
+/// 既定の保管庫の名前（ホームのフォルダの直下のフォルダ）。画面の文にだけ使い、パスは組み立てない
+/// （場所を決めて作る・開くのは vault-core）。vault-ffi の `DEFAULT_VAULT_NAME` と同じことを units_test が確かめる。
+const String defaultVaultName = 'Buildoffice';
+
+/// 既定の保管庫を開いた結果。
+class OpenedDefault {
+  const OpenedDefault({required this.api, required this.created});
+
+  /// 開いた保管庫（書ける状態）。
+  final VaultApi api;
+
+  /// この呼び出しで作ったか（なかったので作った）。
+  final bool created;
+}
+
+/// 既定の保管庫（ホームのフォルダの直下の [defaultVaultName]）を、書ける状態で開く関数（なければ作る）。
+/// 人だけの手続き（ツールにしない）。
+typedef VaultDefaultOpener = Future<OpenedDefault> Function();

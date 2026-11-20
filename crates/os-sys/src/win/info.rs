@@ -1,4 +1,4 @@
-//! ハンドルでの rename（W15 の NtSetInformationFile）と、ハンドルで消す処理（W2 の SetFileInformationByHandle）。
+//! ハンドルでの rename（NtSetInformationFile）と、ハンドルで消す処理（SetFileInformationByHandle）。
 //!
 //! 渡すバッファ（FILE_RENAME_INFORMATION・FILE_DISPOSITION_INFO(_EX)）は、安全なコードでバイト列として
 //! 組み立て、8 バイトにそろえた `Vec<u64>` に写してから OS に渡す。

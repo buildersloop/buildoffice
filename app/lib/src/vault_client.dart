@@ -48,6 +48,34 @@ final class VaultClient implements VaultApi {
     return VaultClient._(dllPath, handle);
   }
 
+  /// 置き場所（`parent`）の中に、名前（`name`）を付けて保管庫を作り、書ける状態で開く。名前の確かめ・パスのつなぎ・
+  /// 根の判定は vault-core（Dart ではパスを組み立てない）。
+  static Future<VaultClient> create({
+    required String dllPath,
+    required String parent,
+    required String name,
+  }) async {
+    final request = jsonEncode({'parent': parent, 'name': name});
+    final reply = await Isolate.run(
+      () => VaultLibrary.open(dllPath).create(request),
+    );
+    final ok = _unwrap(reply);
+    final handle = (ok['handle']! as num).toInt();
+    return VaultClient._(dllPath, handle);
+  }
+
+  /// 既定の保管庫（ホームのフォルダの直下の [defaultVaultName]）を、書ける状態で開く（なければ作る）。場所を決めるのも、
+  /// 確かめて作るのも vault-core（Dart はパスを知らない・組み立てない）。
+  static Future<OpenedDefault> openDefault({required String dllPath}) async {
+    final reply = await Isolate.run(
+      () => VaultLibrary.open(dllPath).openDefault(),
+    );
+    final ok = _unwrap(reply);
+    final handle = (ok['handle']! as num).toInt();
+    final created = ok['created']! as bool;
+    return OpenedDefault(api: VaultClient._(dllPath, handle), created: created);
+  }
+
   /// ツールを呼ぶ。返り値はツールの返り値（JSON のオブジェクト）。失敗は [VaultException]。
   Future<Map<String, Object?>> call(
     String tool,

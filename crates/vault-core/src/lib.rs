@@ -2,7 +2,10 @@
 //!
 //! いま（Phase 0 の範囲で）あるもの：
 //! - パスの検証（文字列の規則 `RelPath` と、ファイルシステムの規則 `Vault::resolve`）
-//! - 根の判定（`check_root`・`RootEnv`・入れ子の判定・入力の要素の判定）と、`Vault::init`・`Vault::open`
+//! - 根の判定（`check_root`・`RootEnv`・入れ子の判定・入力の要素の判定）と、`Vault::init`・`Vault::open`。
+//!   置き場所と名前から保管庫のパスを作る `vault_path_in` と、置き場所がすでにあるフォルダかを確かめる `check_parent_dir`
+//!   （アプリの画面から作るとき）
+//! - 既定の保管庫（`open_or_create_in`・`open_or_create_in_home`。ホームの直下の決まった名前を、なければ作って開く）
 //! - 書き込みのロック（`Vault::lock`）
 //! - base64（RFC 4648）と RFC 3339 の時刻
 //! - ツールの受付口 `api::call` と `api::tool_specs()`（10個）。10個すべてを作った
@@ -41,6 +44,7 @@ pub mod base64;
 mod error;
 mod fsutil;
 mod guard;
+mod home_vault;
 #[cfg(feature = "test-support")]
 mod hooks;
 mod index;
@@ -58,6 +62,7 @@ pub use actor::{Actor, ActorKind, MAX_ACTOR_ID_CHARS, UNKNOWN_ACTOR_ID, process_
 pub use error::{ErrorCode, ErrorDetail, Result, VaultError};
 pub use fsutil::EntryKind;
 pub use guard::MIN_FREE_AFTER_WRITE;
+pub use home_vault::{HomeVault, open_or_create_in, open_or_create_in_home};
 pub use index::{Index, IndexEntry};
 pub use journal::{JournalEntry, MAX_JOURNAL_FILE_BYTES, Op};
 pub use ops::{
@@ -66,7 +71,7 @@ pub use ops::{
     MoveResult, ReadResult, WriteRequest, WriteResult,
 };
 pub use relpath::{MAX_COMPONENT_BYTES, MAX_PATH_BYTES, RelPath};
-pub use root::{RootEnv, check_root};
+pub use root::{RootEnv, check_parent_dir, check_root, vault_path_in};
 pub use scan::{ChangesResult, DEFAULT_CHANGES_LIMIT, MAX_CHANGES_LIMIT};
 pub use trash::{MAX_ENTRY_BYTES, TrashEntry, TrashReason};
 pub use trash_ops::{
@@ -74,9 +79,9 @@ pub use trash_ops::{
     TrashListResult,
 };
 pub use vault::{
-    DEFAULT_LOCK_TIMEOUT, FORMAT, LOCK_RETRY_INTERVAL, MAX_DISCARDED_SCANS, MAX_FULL_PATH_UTF16,
-    MAX_LOCKED_RECHECKS, MAX_LOCKED_SCAN_TIME, MAX_PATH_DEPTH, MAX_RESCAN_INTERVAL,
-    MIN_RESCAN_INTERVAL, RESCAN_INTERVAL_FACTOR, Vault, VaultLock,
+    DEFAULT_LOCK_TIMEOUT, FORMAT, LINK_SWEEP_PARTS, LOCK_RETRY_INTERVAL, MAX_DISCARDED_SCANS,
+    MAX_FULL_PATH_UTF16, MAX_LOCKED_RECHECKS, MAX_LOCKED_SCAN_TIME, MAX_PATH_DEPTH,
+    MAX_RESCAN_INTERVAL, MIN_RESCAN_INTERVAL, RESCAN_INTERVAL_FACTOR, Vault, VaultLock,
 };
 
 /// テストだけが使う部品（公開の API ではない。結合テストが `CARGO_TARGET_TMPDIR` の下で使う）。
@@ -108,9 +113,9 @@ pub mod test_support {
     }
 
     pub use crate::hooks::{
-        DirHold, FakeFreeSpace, FinalAt, Place, Removing, Rename, Step, advance_scan_clock,
-        fake_final_path, fake_free_space, fake_scan_duration, on_next, record_dir_holds,
-        take_dir_holds,
+        DirHold, FakeFreeSpace, FakeLinks, FinalAt, Place, Removing, Rename, Step,
+        advance_scan_clock, fake_final_path, fake_free_space, fake_journal_links,
+        fake_scan_duration, on_next, record_dir_holds, take_dir_holds,
     };
 
     /// 環境変数の値だけから `RootEnv` を作る（OS には問い合わせない）。偽のホームをテスト用のフォルダの下に置いて、
@@ -127,6 +132,16 @@ pub mod test_support {
     /// 合わせ直せずに「次の走査で調べ直す」印を付けたパス。
     pub fn scan_rechecks(vault: &crate::Vault) -> Vec<String> {
         vault.scan_rechecks()
+    }
+
+    /// 走査で、ほかの名前とハードリンクでつながっていると分かったファイル（毎回開いて読み直す印）。
+    pub fn link_marks(vault: &crate::Vault) -> Vec<String> {
+        vault.link_marks()
+    }
+
+    /// 走査の回り番の次の番を決める（始めの番はプロセスごとにずれるので、テストで固定する）。
+    pub fn set_sweep_slot(vault: &crate::Vault, slot: u32) {
+        vault.set_sweep_slot(slot);
     }
 
     /// このスレッドの次の走査で、歩き終わったあと・ロックを取る前に、`hook` を1回だけ呼ぶ

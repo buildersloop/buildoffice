@@ -99,6 +99,23 @@ pub(crate) fn os_places() -> crate::root::OsPlaces {
     crate::root::OsPlaces::NotAsked
 }
 
+/// 既定の保管庫のホーム（Windows 以外はまだ作らない）。
+pub(crate) fn os_home() -> Result<PathBuf> {
+    Err(VaultError::new(
+        ErrorCode::NotImplemented,
+        "既定の保管庫は、この OS ではまだ使えない（Windows だけ）",
+    ))
+}
+
+/// `path` の最後の要素がリンクでないフォルダか（Windows 以外は ID を持たないので、パスだけで見る）。
+pub(crate) fn is_same_dir_without_links(path: &Path, _id: &RootId) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => Ok(meta.is_dir() && !meta.file_type().is_symlink()),
+        Err(e) if is_not_found(&e) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 impl Root {
     pub(crate) fn open(expected: &Path, _id: &RootId) -> Result<Self> {
         test_hook!(Step::BeforeRoot);
@@ -412,19 +429,29 @@ pub(crate) fn open_journal_file(dir: &Held, name: &ManagedName) -> Result<File> 
         .map_err(|e| VaultError::io("履歴のファイルを開けない", &e))
 }
 
+/// 履歴のファイルがほかの名前とつながっているか。Windows 以外では、CI が動くまで調べない（そのときは std の `MetadataExt::nlink()` で読む）。いつも「つながっていない」。
+pub(crate) fn journal_is_linked(_file: &File) -> Result<bool> {
+    Ok(false)
+}
+
 pub(crate) fn create_journal_file(
     _root: &Root,
     dir: &Held,
     name: &ManagedName,
-) -> Result<(File, Made)> {
+) -> Result<Option<(File, Made)>> {
     let path = dir.0.join(name.as_str());
-    let file = OpenOptions::new()
+    let file = match OpenOptions::new()
         .read(true)
         .append(true)
         .create_new(true)
         .open(&path)
-        .map_err(|e| io_or_disk_full("履歴のファイルを作れない", &e))?;
-    Ok((file, Made(path, false)))
+    {
+        Ok(file) => file,
+        // 同じ名前のものがすでにある（create_new なので、何も上書きしていない）
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
+        Err(e) => return Err(io_or_disk_full("履歴のファイルを作れない", &e)),
+    };
+    Ok(Some((file, Made(path, false))))
 }
 
 pub(crate) fn open_journal_for_reading(dir: &Held, name: &ManagedName) -> Result<File> {
@@ -939,7 +966,8 @@ fn path_child_dir(path: PathBuf) -> ChildDir {
 }
 
 pub(crate) enum ChildActual {
-    Found(FileInfo, String),
+    /// 今の値・実際の名前・ほかの名前とつながったファイルか（Windows 以外は調べず、いつも false）。
+    Found(FileInfo, String, bool),
     Missing,
     Unreadable,
 }
@@ -984,7 +1012,7 @@ pub(crate) fn child_actual(
         Some(parent_rel) => format!("{parent_rel}/{name}"),
         None => name.to_owned(),
     };
-    ChildActual::Found(FileInfo::from_metadata(&meta), actual)
+    ChildActual::Found(FileInfo::from_metadata(&meta), actual, false)
 }
 
 pub(crate) fn open_child_dir(parent: ParentRef<'_>, name: &OsStr, _retry: bool) -> ChildDir {
@@ -998,6 +1026,11 @@ impl Held {
 
     pub(crate) fn child_info(&self, name: &OsStr) -> ChildInfo {
         path_info(&self.0.join(name))
+    }
+
+    /// 走査：今の値と、ほかの名前とつながったファイルか（Windows 以外は調べず、いつも false）。
+    pub(crate) fn scan_child_info(&self, name: &OsStr) -> (ChildInfo, bool) {
+        (path_info(&self.0.join(name)), false)
     }
 
     pub(crate) fn open_child_dir(&self, name: &OsStr, _retry: bool) -> ChildDir {
@@ -1159,6 +1192,15 @@ impl InitScope {
 
     pub(crate) fn target(&self) -> &Path {
         &self.target
+    }
+
+    /// 保管庫にするフォルダがすでにあるとき、入力のパスの最後の要素がリンクでないか（パスだけで見る）。
+    pub(crate) fn reached_without_links(&self, path: &Path) -> Result<bool> {
+        match fs::symlink_metadata(path) {
+            Ok(meta) => Ok(!meta.file_type().is_symlink()),
+            Err(e) if is_not_found(&e) => Ok(true),
+            Err(e) => Err(VaultError::io("保管庫のフォルダの場所を調べられない", &e)),
+        }
     }
 
     pub(crate) fn prepare_root(&mut self) -> Result<()> {

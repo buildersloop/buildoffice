@@ -20,7 +20,7 @@ use std::io;
 pub use child::{create_dir_child, create_file_child, open_child, open_pass_dir};
 pub use dir::{DirEntry, EntryKind, read_dir_by_handle};
 pub use disk::free_space;
-pub use id::{FileId, file_id};
+pub use id::{FileId, file_id, link_count};
 pub use info::{delete_by_handle, rename_no_replace, rename_replace};
 pub use known::{KnownFolder, known_folder};
 pub use name::{InvalidName, Name};

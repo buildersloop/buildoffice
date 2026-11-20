@@ -1,4 +1,4 @@
-//! 開いたハンドルの最終のパス（W1。GetFinalPathNameByHandleW）。
+//! 開いたハンドルの最終のパス（GetFinalPathNameByHandleW）。
 
 use std::ffi::OsString;
 use std::io;

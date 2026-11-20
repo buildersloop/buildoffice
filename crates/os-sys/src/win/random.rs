@@ -1,4 +1,4 @@
-//! OS の乱数（W4。BCryptGenRandom）。
+//! OS の乱数（BCryptGenRandom）。
 
 use std::io;
 use std::ptr;

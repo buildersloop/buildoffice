@@ -1,14 +1,16 @@
 [package]
 name = "vault-mcp"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
 # 外部の依存は serde_json だけ。ツールの受付口（vault-core）と MCP の層（mcp-proto）をつなぐ。
+# ログの1行と panic の知らせは safe-log。
 [dependencies]
 mcp-proto = { path = "../mcp-proto" }
+safe-log = { path = "../safe-log" }
 serde_json = "1"
 vault-core = { path = "../vault-core" }
 

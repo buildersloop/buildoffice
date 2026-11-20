@@ -2,7 +2,9 @@
 #define RUNNER_FLUTTER_WINDOW_H_
 
 #include <flutter/dart_project.h>
+#include <flutter/encodable_value.h>
 #include <flutter/flutter_view_controller.h>
+#include <flutter/method_channel.h>
 
 #include <memory>
 
@@ -28,6 +30,13 @@ class FlutterWindow : public Win32Window {
 
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
+
+  // The "buildoffice/folder_picker" channel (shows the OS folder picker).
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      folder_picker_channel_;
+
+  // True while the folder dialog is open (a second request is refused).
+  bool picking_folder_ = false;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

@@ -1,7 +1,9 @@
 name: vault_app
 description: "保管庫のファイルブラウザ（Phase 0。Windows）。"
 publish_to: 'none'
-version: 0.1.0+1
+# 配る版（X.Y.Z。+ のビルド番号は付けない＝exe の版の情報は X.Y.Z.0）。根の Cargo.toml の
+# [workspace.package] の version と同じにする（scripts/build-release.sh は違えば止まる）。
+version: 0.2.0
 
 environment:
   sdk: ^3.10.7

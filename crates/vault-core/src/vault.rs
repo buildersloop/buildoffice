@@ -16,6 +16,7 @@ use crate::fsutil::TMP_DIR;
 use crate::guard::{
     self, InitScope, ManagedFile, ManagedName, ManagedUse, ParentDir, Pass, Replaceable, Root,
 };
+use crate::home_vault::ExpectedRoot;
 use crate::index::{self, Index};
 use crate::journal::{JOURNAL_DIR, JournalWriter, Op, Record};
 use crate::relpath::{RESERVED_NAME, RelPath};
@@ -72,6 +73,8 @@ pub struct Vault {
     min_rescan_interval: Duration,
     /// 前の走査にかかった時間に掛ける倍数（走査の間隔を伸ばす）。
     rescan_interval_factor: u32,
+    /// 走査の回り番で、ファイルをいくつに分けるか（0 なら回り番をしない）。
+    link_sweep_parts: u32,
 }
 
 /// 走査の状態。
@@ -85,6 +88,30 @@ struct ScanState {
     incompletes: u32,
     /// 合わせ直せずに「次の走査で調べ直す」印を付けたパス（`""` は保管庫の全体）。
     rechecks: BTreeSet<String>,
+    /// ほかの名前とハードリンクでつながっていると分かったファイル（走査で毎回開いて読み直す。プロセスの中だけ。
+    /// 索引には入れない）。
+    linked: BTreeSet<String>,
+    /// 走査の回り番の次の番（歩くたびに1つ進める。始めはプロセスごとにずらす）。
+    sweep_slot: u32,
+}
+
+impl ScanState {
+    fn new() -> Self {
+        Self {
+            sweep_slot: first_sweep_slot(),
+            ..Self::default()
+        }
+    }
+}
+
+/// 回り番の始めの番（プロセスごとにずらす：起動した時刻のナノ秒とプロセスの番号。vault-mcp はセッションごとの
+/// プロセスで、16 回より少ない走査で終わることがあるので、いつも 0 から始めると、後ろの番のファイルがずっと
+/// 開かれない）。
+fn first_sweep_slot() -> u32 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    nanos ^ std::process::id()
 }
 
 /// 走査の終わり方（間隔と、続けて捨てた回数を覚えるため）。
@@ -121,6 +148,9 @@ pub const MAX_DISCARDED_SCANS: u32 = 2;
 pub const MAX_LOCKED_RECHECKS: usize = 256;
 /// ロックの中で、調べ直しと比べ直しに使う時間の上限（超えたら、ロックを外して、ロックの外で合わせ直す）。
 pub const MAX_LOCKED_SCAN_TIME: Duration = Duration::from_secs(1);
+/// 走査の回り番で、ファイルをいくつに分けるか（設計の決定）。1回の走査で、一覧の値が索引と同じ
+/// ファイルのうち 1/16 を開き、まだ分からないハードリンク（外の名前から書き換えても一覧の値が古いまま。R22）を探す。
+pub const LINK_SWEEP_PARTS: u32 = 16;
 
 /// 書き込みのロック。この値を持っているあいだだけ効き、Drop で外れる。
 #[must_use = "ロックは、この値を持っているあいだだけ効く"]
@@ -145,9 +175,27 @@ impl Vault {
     /// 履歴に `init` を記録し、空の索引を書く。`actor` は、アプリなら `{user, app}`、
     /// `vault-mcp init` なら `{user, cli}`。
     pub fn init(path: &Path, env: &RootEnv, actor: &Actor) -> Result<()> {
+        Self::init_checked(path, env, actor, None)
+    }
+
+    /// init の本体。`expected`（既定の保管庫の、期待する根）があれば、何かを作る前（begin のあと、
+    /// prepare_root の前）に、保管庫にするフォルダの場所が「置き場所を解いた形＋名前」か、すでにあるならリンクを
+    /// たどらずに着くかを確かめ、違えば何も作らずに `INVALID_ROOT`。
+    pub(crate) fn init_checked(
+        path: &Path,
+        env: &RootEnv,
+        actor: &Actor,
+        expected: Option<&ExpectedRoot>,
+    ) -> Result<()> {
         check_input_path(path)?;
         // 入力のパスを深いほうから開き、いちばん深いある祖先を持つ（何も作らない）
         let mut scope = InitScope::begin(path)?;
+        if let Some(expected) = expected {
+            expected.check(scope.target())?;
+            if !scope.reached_without_links(path)? {
+                return Err(ExpectedRoot::moved());
+            }
+        }
         check_root(scope.target(), env)?;
         check_no_ancestor_vault(scope.target())?;
         match init_at(&mut scope, env, actor) {
@@ -165,6 +213,18 @@ impl Vault {
     /// `.vault/vault.json` がない・読めない・知らない形式なら `NOT_A_VAULT`。
     /// 書ける状態で開いたときは、`.vault/tmp` に残った一時ファイルを、reason `orphan_tmp` でゴミ箱へ移す（消さない）。
     pub fn open(path: &Path, read_only: bool, env: &RootEnv) -> Result<Self> {
+        Self::open_checked(path, read_only, env, None)
+    }
+
+    /// open の本体。`expected`（既定の保管庫の、期待する根）があれば、根を決めた直後（ゴミ箱へ
+    /// 移す片づけなど、何かを変える前）に、根が「置き場所を解いた形＋名前」で、入力のパスからリンクをたどらずに
+    /// 着く（同じ ID）かを確かめ、違えば `INVALID_ROOT`。
+    pub(crate) fn open_checked(
+        path: &Path,
+        read_only: bool,
+        env: &RootEnv,
+        expected: Option<&ExpectedRoot>,
+    ) -> Result<Self> {
         check_input_path(path)?;
         // 入力のパスを、リンクをたどって開き、そのハンドルの最終のパスを根にし、ID を覚える
         let (root, root_id) = match guard::resolve_root(path) {
@@ -174,6 +234,10 @@ impl Vault {
             }
             Err(e) => return Err(VaultError::io("保管庫のフォルダを調べられない", &e)),
         };
+        if let Some(expected) = expected {
+            expected.check(&root)?;
+            expected.check_without_links(path, &root_id)?;
+        }
         check_root(&root, env)?;
         check_no_ancestor_vault(&root)?;
 
@@ -196,9 +260,10 @@ impl Vault {
             read_only,
             meta,
             lock_timeout: DEFAULT_LOCK_TIMEOUT,
-            scan_state: Mutex::new(ScanState::default()),
+            scan_state: Mutex::new(ScanState::new()),
             min_rescan_interval: MIN_RESCAN_INTERVAL,
             rescan_interval_factor: RESCAN_INTERVAL_FACTOR,
+            link_sweep_parts: LINK_SWEEP_PARTS,
         };
         // 書ける状態で開いたときは、.vault/tmp に残った一時ファイルをゴミ箱へ移す（消さない）
         if !read_only {
@@ -339,6 +404,47 @@ impl Vault {
         self.rescan_interval_factor = factor;
     }
 
+    /// 走査の回り番で、ファイルをいくつに分けるかを変える（既定は `LINK_SWEEP_PARTS`＝16。0 なら回り番をしない、
+    /// 1 なら毎回すべてのファイルを開く）。ほかの名前とつながっていると分かったファイルは、これと関係なく毎回開く。
+    pub fn set_link_sweep_parts(&mut self, parts: u32) {
+        self.link_sweep_parts = parts;
+    }
+
+    /// この回の走査で使う、前の印と回り番（分ける数と番）。番を1つ進める。Windows 以外は回り番をしない
+    /// （リンクの数を読まないため）。
+    pub(crate) fn link_sweep_start(&self) -> (BTreeSet<String>, u32, u32) {
+        let parts = if cfg!(windows) {
+            self.link_sweep_parts
+        } else {
+            0
+        };
+        let mut state = self.scan_state();
+        let slot = if parts == 0 {
+            0
+        } else {
+            state.sweep_slot % parts
+        };
+        state.sweep_slot = if parts == 0 { 0 } else { (slot + 1) % parts };
+        (state.linked.clone(), parts, slot)
+    }
+
+    /// 歩き終えた走査（捨てた回・未完了の回も）の印に置き換える（エラーで終わった回は置き換えない）。
+    pub(crate) fn set_link_marks(&self, marks: BTreeSet<String>) {
+        self.scan_state().linked = marks;
+    }
+
+    /// ほかの名前とつながっていると分かったファイルの印（テストの差し込み口）。
+    #[cfg(feature = "test-support")]
+    pub(crate) fn link_marks(&self) -> Vec<String> {
+        self.scan_state().linked.iter().cloned().collect()
+    }
+
+    /// 回り番の次の番を決める（テストの差し込み口。始めの番はプロセスごとにずれるので、テストで固定する）。
+    #[cfg(feature = "test-support")]
+    pub(crate) fn set_sweep_slot(&self, slot: u32) {
+        self.scan_state().sweep_slot = slot;
+    }
+
     fn scan_state(&self) -> std::sync::MutexGuard<'_, ScanState> {
         self.scan_state
             .lock()
@@ -428,6 +534,11 @@ impl Vault {
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
+
+    /// 開いたときの根の ID（既定の保管庫で、開いたあとに場所を確かめ直す）。
+    pub(crate) fn root_id(&self) -> &guard::RootId {
+        &self.root_id
+    }
 }
 
 /// ロックのファイルを開いて、`try_lock` を 50ms おきに試す。`timeout` を過ぎたら `LOCKED`。
@@ -489,7 +600,7 @@ fn init_at(scope: &mut InitScope, env: &RootEnv, actor: &Actor) -> Result<()> {
         scope.record(made);
     }
     journal.push(actor, Op::Init, Record::default())?;
-    journal.commit()?;
+    journal.commit(root_handle, |made| scope.record(made))?;
     let written = index::save(root_handle, vault_handle, &lock, &Index::default())?;
     scope.record_written(ManagedName::IndexJson, &written);
 

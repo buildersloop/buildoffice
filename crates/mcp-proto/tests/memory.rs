@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::fixture;
-use mcp_proto::{CallError, Server, ServerInfo, ToolDef, ToolHost};
+use mcp_proto::{CallError, Name, Server, ServerInfo, ToolDef, ToolHost};
 use serde_json::{Value, json};
 
 /// 引数を写さない受付口（サーバーそのもののメモリを測るため。偽の受付口は、記録のために引数を写す）。
@@ -32,6 +32,10 @@ impl ToolHost for CountingHost {
             .or_else(|| arguments["a"].as_object().map(serde_json::Map::len))
             .unwrap_or(0);
         Ok(json!({ "items": items }))
+    }
+
+    fn log_names(&self) -> &[Name] {
+        &[]
     }
 }
 

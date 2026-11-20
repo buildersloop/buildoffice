@@ -421,7 +421,38 @@ pub(crate) fn resolve_root_path(path: &Path) -> io::Result<PathBuf> {
     os_sys::final_path(file)
 }
 
-/// 既知のフォルダの場所を OS に問い合わせる（W5。根の判定の RootEnv に足す）。取れなかった
+/// 既定の保管庫の置き場所にするホーム：OS の既知のフォルダ Profile（自分のプロセスのトークンで問い合わせ、
+/// KF_FLAG_DONT_VERIFY。環境変数は使わない）。問い合わせられなければ `INVALID_ROOT`。文にパスを入れない。
+/// ホームのパスは vault-core の外へ出さない（呼ぶのは home_vault.rs だけ）。
+pub(crate) fn os_home() -> Result<PathBuf> {
+    os_sys::known_folder(KnownFolder::Profile).map_err(|_| {
+        VaultError::new(
+            ErrorCode::InvalidRoot,
+            "OS にホームのフォルダを問い合わせられないので、既定の保管庫を開けない",
+        )
+    })
+}
+
+/// `path` を、最後の要素のリンクをたどらずに開き、フォルダで、その ID が `id` と同じか（既定の保管庫で、場所が
+/// リンクに差し替えられていないことを確かめる）。途中の要素のリンクは OS がたどる。ない・リンク・
+/// フォルダでない・ID が違うなら false。`id` が None（ID を受け付けないファイルシステム）なら、フォルダでリンクで
+/// ないことだけを見る。調べられないときは Err。
+pub(crate) fn is_same_dir_without_links(path: &Path, id: &RootId) -> io::Result<bool> {
+    let opened = match os_sys::open_path(path, Links::DontFollow, LEAF_ATTRS, SHARE_ALL) {
+        Ok(opened) => opened,
+        Err(e) if is_not_found(&e) => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let Opened::Dir(dir) = opened else {
+        return Ok(false);
+    };
+    match id {
+        Some(id) => Ok(os_sys::file_id(dir.as_file())? == *id),
+        None => Ok(true),
+    }
+}
+
+/// 既知のフォルダの場所を OS に問い合わせる（根の判定の RootEnv に足す）。取れなかった
 /// ものは None（ホームが取れないときに断るのは RootEnv）。
 pub(crate) fn os_places() -> OsPlaces {
     let get = |folder| os_sys::known_folder(folder).ok();
@@ -967,18 +998,42 @@ pub(crate) fn open_journal_file(dir: &Held, name: &ManagedName) -> Result<File> 
     }
 }
 
+/// 開いた履歴のファイルが、ほかの名前とハードリンクでつながっているか（同じハンドルで読んだリンクの数が2以上）。
+/// 読めなければ IO_ERROR（書かない側）。
+///
+/// 履歴の追記は、その場で中身を書く唯一の道なので、書く前にリンクの数を読むのはこの関数だけ（JournalWriter の
+/// open と、commit の書く直前から呼ぶ）。つながっていれば、呼ぶ側はそのファイルに書かず、新しい
+/// 履歴のファイルに切り替える（ハードリンクで残すバックアップの写しを書き換えない）。
+pub(crate) fn journal_is_linked(file: &File) -> Result<bool> {
+    #[cfg(feature = "test-support")]
+    if let Some(fake) = crate::hooks::take_journal_links() {
+        return match fake {
+            crate::hooks::FakeLinks::Count(n) => Ok(n >= 2),
+            crate::hooks::FakeLinks::Fail => Err(VaultError::new(
+                ErrorCode::IoError,
+                "履歴のファイルを調べられない（テストの差し込み）",
+            )),
+        };
+    }
+    os_sys::link_count(file)
+        .map(|n| n >= 2)
+        .map_err(|e| VaultError::io("履歴のファイルを調べられない", &e))
+}
+
 /// 新しい履歴のファイルを作る（FILE_CREATE。JOURNAL_APPEND）。最終のパスが `.vault\journal\<名前>` でなければ
 /// （起きないはず。親の journal は持っている）NOT_A_VAULT。作ったハンドルは DELETE の権利を持たないので、
 /// そのときも消さない（空のファイルが残るだけ）。作ったものの記録（ID は書く前に
-/// 作ったハンドルで読む）も返す（init の片づけ）。
+/// 作ったハンドルで読む）も返す（init の片づけ）。同じ名前のものがすでにあれば None（上書きしない）。
 pub(crate) fn create_journal_file(
     root: &Root,
     dir: &Held,
     name: &ManagedName,
-) -> Result<(File, Made)> {
+) -> Result<Option<(File, Made)>> {
     let n = single_name(name.as_str())?;
     let created = match dir.parent().create_file(&n, JOURNAL_APPEND, SHARE_RW) {
         Ok(c) => c,
+        // 同じ名前のものがすでにある（FILE_CREATE なので、何も上書きしていない）：呼ぶ側が名前を決め直す
+        Err(e) if is_collision(&e) => return Ok(None),
         Err(e) if is_reparse(&e) => {
             return Err(not_a_vault("履歴のファイルが、ふつうのファイルでない"));
         }
@@ -992,7 +1047,7 @@ pub(crate) fn create_journal_file(
         &name.below_vault(),
     )?;
     let made = Made::from_file(MadeItem::InitFile(name.clone()), &created);
-    Ok((created.into_inner(), made))
+    Ok(Some((created.into_inner(), made)))
 }
 
 /// 履歴のファイルを、読むために開く（LEAF_READ）。リンク・ふつうのファイルでないものは NOT_A_VAULT。
@@ -1369,6 +1424,18 @@ impl InitScope {
     /// 保管庫にするフォルダの場所（base の最終のパス＋tail）。check_root に渡す。
     pub(crate) fn target(&self) -> &Path {
         &self.target
+    }
+
+    /// 保管庫にするフォルダがすでにあり、begin で開いて持っているとき、入力のパスを最後の要素のリンクをたどらずに
+    /// 開いたものが、そのフォルダ（同じ ID）か（既定の保管庫だけ）。まだないときは true（作る所で、
+    /// 作ったものの最終のパスが「置き場所＋名前」と同じかを確かめる）。持っているフォルダは名前を変えられないので、
+    /// あいだで差し替えられることはない。
+    pub(crate) fn reached_without_links(&self, path: &Path) -> Result<bool> {
+        if self.root.is_none() {
+            return Ok(true);
+        }
+        is_same_dir_without_links(path, &self.base_id)
+            .map_err(|e| VaultError::io("保管庫のフォルダの場所を調べられない", &e))
     }
 
     /// `tail` の最初の `n` 個（相対の名前。注とエラーの文に使う）。
@@ -2559,8 +2626,15 @@ pub(crate) enum ChildInfo {
 
 /// 親を基準に、項目を属性だけで開いて今の値を読む（LEAF_ATTRS。リンクはたどらない。属性だけなので使用中にならない）。
 fn child_info(parent: ParentRef<'_>, name: &OsStr) -> ChildInfo {
+    child_info_links(parent, name, false).0
+}
+
+/// `child_info` と同じく今の値を読み、`read_links` なら、ファイルのときだけ同じハンドルでリンクの数も読む（走査。
+///）。返す真偽は「ほかの名前とハードリンクでつながっている（2以上）」。読めなければ
+/// つながっていない（1）として扱う（印は読み直しの手がかりにすぎない。外を書き換えない守りは書く道の rename）。
+fn child_info_links(parent: ParentRef<'_>, name: &OsStr, read_links: bool) -> (ChildInfo, bool) {
     let Some(n) = listed_name(name) else {
-        return ChildInfo::Unreadable;
+        return (ChildInfo::Unreadable, false);
     };
     match parent.open_child(&n, Want::Any, LEAF_ATTRS, SHARE_ALL) {
         Ok(opened) => {
@@ -2569,26 +2643,37 @@ fn child_info(parent: ParentRef<'_>, name: &OsStr) -> ChildInfo {
                 Opened::File(f) | Opened::Link(f) => f,
             };
             match file.metadata() {
-                Ok(meta) => ChildInfo::Info(FileInfo::from_metadata(&meta)),
-                Err(_) => ChildInfo::Unreadable,
+                Ok(meta) => {
+                    let info = FileInfo::from_metadata(&meta);
+                    let linked = read_links && is_linked_file(file, &info);
+                    (ChildInfo::Info(info), linked)
+                }
+                Err(_) => (ChildInfo::Unreadable, false),
             }
         }
-        Err(e) if is_not_found(&e) => ChildInfo::Missing,
-        Err(_) => ChildInfo::Unreadable,
+        Err(e) if is_not_found(&e) => (ChildInfo::Missing, false),
+        Err(_) => (ChildInfo::Unreadable, false),
     }
+}
+
+/// 開いたハンドルがふつうのファイルで、リンクの数が2以上か（走査の印。読めなければ false）。
+fn is_linked_file(file: &File, info: &FileInfo) -> bool {
+    info.kind == EntryKind::File && os_sys::link_count(file).is_ok_and(|n| n >= 2)
 }
 
 /// 項目を開いて読んだ、今の値と実際の名前。
 pub(crate) enum ChildActual {
-    /// 今の値と、実際の名前（開いたハンドルの最終のパスから。`/` 区切り）。
-    Found(FileInfo, String),
+    /// 今の値と、実際の名前（開いたハンドルの最終のパスから。`/` 区切り）と、ほかの名前とハードリンクで
+    /// つながったファイルか（同じハンドルで読む。読めなければ false）。
+    Found(FileInfo, String, bool),
     Missing,
     /// 開けない・場所を確かめられない。
     Unreadable,
 }
 
 /// 親を基準に、項目を属性だけで開き（LEAF_ATTRS。リンクはたどらない。名前は大文字小文字を問わずに解く）、今の値と、
-/// 最終のパスから実際の名前（利用者の対象 `rel` の場所にあれば）を読む（走査の調べ直し）。
+/// 最終のパスから実際の名前（利用者の対象 `rel` の場所にあれば）と、ファイルならリンクの数が2以上かを読む
+/// （走査の調べ直し）。
 pub(crate) fn child_actual(
     root: &Root,
     parent: ParentRef<'_>,
@@ -2611,7 +2696,11 @@ pub(crate) fn child_actual(
         return ChildActual::Unreadable;
     };
     match check_user_target(root, file, rel, At::Target) {
-        Ok(actual) => ChildActual::Found(FileInfo::from_metadata(&meta), actual),
+        Ok(actual) => {
+            let info = FileInfo::from_metadata(&meta);
+            let linked = is_linked_file(file, &info);
+            ChildActual::Found(info, actual, linked)
+        }
         Err(_) => ChildActual::Unreadable,
     }
 }
@@ -2665,6 +2754,12 @@ impl Held {
     /// 項目を属性だけで開き、今の値を読む（LEAF_ATTRS）。
     pub(crate) fn child_info(&self, name: &OsStr) -> ChildInfo {
         child_info(self.parent(), name)
+    }
+
+    /// 走査：項目を属性だけで開き、今の値と、ファイルならほかの名前とハードリンクでつながっているか（同じハンドルで
+    /// リンクの数を読む。読めなければ false）を読む。
+    pub(crate) fn scan_child_info(&self, name: &OsStr) -> (ChildInfo, bool) {
+        child_info_links(self.parent(), name, true)
     }
 
     /// このハンドルを基準に、下のフォルダを HOLD_DIR で開く。
@@ -3154,7 +3249,7 @@ mod tests {
         from..to
     }
 
-    /// TP2 の続き：`Root::open(` を呼ぶのは vault.rs の `fn open` と `fn op_root` の中だけ。
+    /// TP2 の続き：`Root::open(` を呼ぶのは vault.rs の `fn open_checked`（open の本体）と `fn op_root` の中だけ。
     /// `Root::resolve` は InitScope に移してなくした（どこからも呼ばない）。guard の Root の縛りなので、この
     /// テストは guard に置く（src の全部のファイルを読む）。
     #[test]
@@ -3164,7 +3259,7 @@ mod tests {
             .iter()
             .find(|(name, _)| name == "vault.rs")
             .expect("vault.rs がない");
-        let open = fn_block(vault, "    pub fn open(", "    ");
+        let open = fn_block(vault, "    pub(crate) fn open_checked(", "    ");
         let op_root = fn_block(vault, "    pub(crate) fn op_root(", "    ");
         let mut opens = 0;
         for (name, lines) in &files {

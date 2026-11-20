@@ -137,6 +137,8 @@ unsafe extern "system" {
 // 情報の種類（um\minwinbase.h:178〜211 の FILE_INFO_BY_HANDLE_CLASS。並びの番号）
 // ---------------------------------------------------------------------------
 
+/// FileStandardInfo（minwinbase.h:180）。
+pub(crate) const CLASS_STANDARD_INFO: i32 = 1;
 /// FileDispositionInfo（minwinbase.h:183）。
 pub(crate) const CLASS_DISPOSITION_INFO: i32 = 4;
 /// FileFullDirectoryInfo（minwinbase.h:193）。
@@ -342,6 +344,19 @@ pub(crate) struct FileDispositionInfoEx {
     pub(crate) flags: u32,
 }
 
+/// FILE_STANDARD_INFO（um\WinBase.h:9111〜9117）。LARGE_INTEGER の2つ・DWORD・BOOLEAN の2つ（BOOLEAN は BYTE。
+/// winnt.h:1217）。BOOLEAN は Rust の `bool` にしない（OS が 0・1 以外を書いても正しい値のままにするため `u8`）。
+/// 読むのは NumberOfLinks だけ（id.rs の `link_count`）。ほかの項目は並びを合わせるためだけに置く。
+#[repr(C)]
+#[allow(dead_code)]
+pub(crate) struct FileStandardInfo {
+    pub(crate) allocation_size: i64,
+    pub(crate) end_of_file: i64,
+    pub(crate) number_of_links: u32,
+    pub(crate) delete_pending: u8,
+    pub(crate) directory: u8,
+}
+
 /// FILE_ID_INFO（um\WinBase.h:9284）。FileId は FILE_ID_128（winnt.h:16185、BYTE の 16 個）。
 #[repr(C)]
 pub(crate) struct FileIdInfo {
@@ -400,7 +415,7 @@ pub(crate) const ID_EXTD_FILE_ID_AT: usize = offset_of!(FileIdExtdDirInfo, file_
 pub(crate) const ID_EXTD_NAME_AT: usize = offset_of!(FileIdExtdDirInfo, file_name);
 
 // ---------------------------------------------------------------------------
-// GUID と既知のフォルダの ID（W5）
+// GUID と既知のフォルダの ID
 // ---------------------------------------------------------------------------
 
 /// GUID（shared\guiddef.h:22〜26）。unsigned long は Windows では 32 ビット。大きさ 16、位置 0・4・6・8。
@@ -505,6 +520,15 @@ mod tests {
         assert_eq!(offset_of!(FileIdInfo, volume_serial_number), 0);
         assert_eq!(offset_of!(FileIdInfo, file_id), 8);
 
+        // FILE_STANDARD_INFO（WinBase.h:9111〜9117）：位置 0・8・16・20・21、最後の 2 バイトは詰め物で大きさ 24
+        assert_eq!(size_of::<FileStandardInfo>(), 24);
+        assert_eq!(offset_of!(FileStandardInfo, allocation_size), 0);
+        assert_eq!(offset_of!(FileStandardInfo, end_of_file), 8);
+        assert_eq!(offset_of!(FileStandardInfo, number_of_links), 16);
+        assert_eq!(offset_of!(FileStandardInfo, delete_pending), 20);
+        assert_eq!(offset_of!(FileStandardInfo, directory), 21);
+        assert_eq!(std::mem::align_of::<FileStandardInfo>(), 8);
+
         assert_eq!(size_of::<FileFullDirInfo>(), 72);
         assert_eq!(DIR_NEXT_AT, 0);
         assert_eq!(DIR_LAST_WRITE_AT, 24);
@@ -563,6 +587,23 @@ mod tests {
         assert_eq!(size_of::<IoStatusBlock>(), 16);
         assert_eq!(offset_of!(IoStatusBlock, status), 0);
         assert_eq!(offset_of!(IoStatusBlock, information), 8);
+    }
+
+    /// 情報の種類の番号（minwinbase.h:178〜211 の並び。FileBasicInfo が 0）。取り違えると、OS が別の形の構造体を
+    /// 書く（大きさが合わなければ断られるが、FILE_ID_INFO と FILE_STANDARD_INFO はどちらも 24 バイト）。
+    #[test]
+    fn info_classes_follow_the_header() {
+        assert_eq!(CLASS_STANDARD_INFO, 1);
+        assert_eq!(CLASS_DISPOSITION_INFO, 4);
+        assert_eq!(CLASS_FULL_DIRECTORY_INFO, 14);
+        assert_eq!(CLASS_FULL_DIRECTORY_RESTART_INFO, 15);
+        assert_eq!(CLASS_ID_INFO, 18);
+        assert_eq!(CLASS_ID_EXTD_DIRECTORY_INFO, 19);
+        assert_eq!(CLASS_ID_EXTD_DIRECTORY_RESTART_INFO, 20);
+        assert_eq!(CLASS_DISPOSITION_INFO_EX, 21);
+        // 同じ 24 バイトの2つは、違う種類
+        assert_eq!(size_of::<FileStandardInfo>(), size_of::<FileIdInfo>());
+        assert_ne!(CLASS_STANDARD_INFO, CLASS_ID_INFO);
     }
 
     /// GUID の大きさと項目の位置（guiddef.h:22〜26。x64）。
